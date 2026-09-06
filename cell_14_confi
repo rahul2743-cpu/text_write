@@ -1,0 +1,16 @@
+# Graph traversal depth
+MAX_HOPS = 2                 # How far to search in the graph
+HOP_DECAY = 0.45             # Reduce weight for evidence from farther hops
+
+# Fuzzy matching configuration
+MATCH_CUTOFF = 72            # Minimum similarity score for a match
+MAX_SEEDS_PER_PHRASE = 3     # Max starting nodes selected per query phrase
+MAX_FRONTIER = 60            # Max nodes carried to the next hop
+MAX_EDGES = 400              # Max relationships explored during traversal
+
+# LLM context configuration
+MAX_TRIPLES = 40             # Max graph triples kept as final evidence
+MAX_DOCS = 4                 # Max documents included in the final context
+MAX_DOC_CHARS = 2500         # Max characters taken from one document
+MAX_CONTEXT_CHARS = 14000    # Max total characters sent to the LLM
+TRIPLE_BUDGET_FRAC = 0.55    # 55% of context budget reserved for graph triples
