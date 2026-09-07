@@ -1,0 +1,19 @@
+1. Build and test the Vector Search pipeline using a dataset of 200 XML articles.
+
+2. Understand in detail how the retriever works, including how it selects and returns the most relevant chunks for a given query.
+
+3. Study the chunking process in detail, including how the XML articles are divided into meaningful chunks and what chunking strategy is currently being used.
+
+4. Analyze why the Knowledge Graph is providing better retrieval results compared to Vector Search, especially from the perspective of chunking and contextual information.
+
+5. Identify what information or relationships are missing from the Vector Search chunks that are available through the Knowledge Graph, and understand why this leads to better KG retrieval results.
+
+6. Understand how the retrieved chunks are ranked and what factors are considered when assigning ranking scores.
+
+7. Study the complete ranking mechanism in detail, including how relevance scores are calculated and how the final order of retrieved results is determined.
+
+8. Investigate whether overlapping chunks should receive higher rankings. Study suitable ranking algorithms and determine how chunk overlap should influence the final ranking score.
+
+9. Understand why Breadth-First Search (BFS) is being used for Knowledge Graph traversal and compare it with Depth-First Search (DFS) to determine why BFS is more suitable for the current retrieval use case.
+
+10. Perform a detailed evaluation of the retrieval system using the 200 XML articles. Define and analyze appropriate evaluation metrics to measure retrieval quality, ranking performance, relevance, coverage, and overall effectiveness of Vector Search and Knowledge Graph retrieval.
