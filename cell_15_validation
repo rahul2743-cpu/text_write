@@ -1,0 +1,39 @@
+# ==========================================================
+# Cell 15A : TEST / VISUALIZE CELL 15 OUTPUT
+# ==========================================================
+
+print("=" * 80)
+print("CELL 15A — ENTITY EXTRACTION OUTPUT")
+print("=" * 80)
+
+# Change this question whenever you want to test
+QUESTION = "How do I open the OpenTCCM model using MTCCM?"
+
+print("\nUSER QUERY:")
+print(QUESTION)
+
+# Call Cell 15 function
+entities = extract_query_entities(QUESTION)
+
+print("\n" + "-" * 80)
+print("CELL 15 OUTPUT")
+print("-" * 80)
+
+if not entities:
+    print("No entities extracted.")
+    print("Output = []")
+
+else:
+    print(f"Number of entities extracted: {len(entities)}\n")
+
+    for i, (phrase, class_hint) in enumerate(entities, start=1):
+        print(f"Entity {i}")
+        print(f"  Phrase     : {phrase}")
+        print(f"  Class Hint : {class_hint}")
+        print()
+
+print("-" * 80)
+print("RAW PYTHON OUTPUT:")
+print(entities)
+
+print("=" * 80)
