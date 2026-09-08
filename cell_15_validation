@@ -1,39 +1,59 @@
 # ==========================================================
-# Cell 15A : TEST / VISUALIZE CELL 15 OUTPUT
+# Cell 16A : DEBUG ENTITY LINKING / SEED NODE OUTPUT
 # ==========================================================
 
 print("=" * 80)
-print("CELL 15A — ENTITY EXTRACTION OUTPUT")
+print("CELL 16A — ENTITY LINKING DEBUG")
 print("=" * 80)
 
-# Change this question whenever you want to test
 QUESTION = "How do I open the OpenTCCM model using MTCCM?"
 
 print("\nUSER QUERY:")
 print(QUESTION)
 
-# Call Cell 15 function
+# Step 1: Extract entities from Cell 15
 entities = extract_query_entities(QUESTION)
 
 print("\n" + "-" * 80)
-print("CELL 15 OUTPUT")
+print("CELL 15 EXTRACTED ENTITIES")
 print("-" * 80)
 
-if not entities:
-    print("No entities extracted.")
-    print("Output = []")
+for i, (phrase, cls) in enumerate(entities, start=1):
+    print(f"{i}. Phrase     : {phrase}")
+    print(f"   Class Hint : {cls}")
+
+# Step 2: Link entities using Cell 16
+print("\n" + "-" * 80)
+print("CELL 16 ENTITY LINKING")
+print("-" * 80)
+
+linked = link_entities(entities)
+
+print("\nRAW LINKED OUTPUT:")
+print(linked)
+
+print("\n" + "-" * 80)
+print("DETAILED SEED NODES")
+print("-" * 80)
+
+if not linked:
+    print("No KG nodes matched.")
 
 else:
-    print(f"Number of entities extracted: {len(entities)}\n")
+    for i, item in enumerate(linked, start=1):
 
-    for i, (phrase, class_hint) in enumerate(entities, start=1):
-        print(f"Entity {i}")
-        print(f"  Phrase     : {phrase}")
-        print(f"  Class Hint : {class_hint}")
-        print()
+        print(f"\nSeed {i}")
+        print("-" * 40)
 
-print("-" * 80)
-print("RAW PYTHON OUTPUT:")
-print(entities)
+        # Works if Cell 16 returns dictionaries
+        if isinstance(item, dict):
+            for key, value in item.items():
+                print(f"{key:15}: {value}")
 
+        # Works if Cell 16 returns tuples/lists
+        else:
+            print(item)
+
+print("\n" + "=" * 80)
+print("ENTITY LINKING COMPLETE")
 print("=" * 80)
