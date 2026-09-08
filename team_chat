@@ -1,0 +1,3 @@
+Hi Venkat, yes, correct. The paper uses chunks for entity and relationship extraction. In our case,
+we already know the source node and target node, so we are using the document content
+to identify the relationship between the two nodes.
