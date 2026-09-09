@@ -1,0 +1,308 @@
+# ==========================================================
+# Cell 20 — KG-GROUNDED TOP-10 + GLOBAL GREEDY MMR
+# 100% QUERY-BASED CHUNK RANKING
+# No embeddings · No vector search · No BM25
+# ==========================================================
+
+import re, math
+from collections import defaultdict, Counter
+
+TOP_K = 10
+MAX_PER_DOC = 3
+CHUNK_SIZE, MIN_CHUNK = 900, 120
+MMR_LAMBDA = 0.80
+
+STOP = {
+    "a","an","the","is","are","was","were","be","been","being",
+    "of","to","for","from","in","on","at","by","with","and","or",
+    "what","which","who","where","when","why","how",
+    "does","do","did","should","would","could","can","may","might"
+}
+
+MARKUP = re.compile(r"\[?<doc:(?:wiki:)?[^<>]+>\]?")
+
+def tokens(text):
+    return [
+        w for w in re.findall(r"[a-z0-9]+", str(text).lower())
+        if len(w) > 1 and w not in STOP
+    ]
+
+def split_chunks(text):
+    text = re.sub(r"\s+", " ", MARKUP.sub(" ", str(text or ""))).strip()
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    out, buf = [], ""
+
+    for s in sents:
+        if len(s) > CHUNK_SIZE:
+            if len(buf) >= MIN_CHUNK:
+                out.append(buf)
+            buf = ""
+            out += [
+                s[i:i+CHUNK_SIZE]
+                for i in range(0, len(s), CHUNK_SIZE)
+                if len(s[i:i+CHUNK_SIZE]) >= MIN_CHUNK
+            ]
+        elif len(buf) + len(s) + 1 <= CHUNK_SIZE:
+            buf = f"{buf} {s}".strip()
+        else:
+            if len(buf) >= MIN_CHUNK:
+                out.append(buf)
+            buf = s
+
+    if len(buf) >= MIN_CHUNK:
+        out.append(buf)
+
+    return out
+
+def jaccard(a, b):
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+# ==========================================================
+# BUILD KG CHUNK INDEX ONCE
+# ==========================================================
+
+if not all(k in globals() for k in ("KG10_CHUNKS","KG10_DF","KG10_TOTAL")):
+
+    DOC_Q = PREFIXES + """
+    SELECT ?doc ?label ?ref ?content WHERE {
+        ?doc ex:documentContent ?content .
+        OPTIONAL { ?doc rdfs:label ?label }
+        OPTIONAL { ?doc ex:sourceReference ?ref }
+    }
+    """
+
+    KG10_CHUNKS = defaultdict(list)
+    KG10_DF = Counter()
+    KG10_TOTAL = 0
+
+    for r in g.query(DOC_Q):
+        uri = str(r.doc)
+        title = str(r.label) if r.label else NODE_LABEL.get(uri, uri)
+        reference = str(r.ref) if r.ref else uri
+
+        for text in split_chunks(r.content):
+            ts = tokens(text)
+
+            chunk = {
+                "content": text,
+                "title": title,
+                "reference": reference,
+                "doc_uri": uri,
+                "_tokens": set(ts),
+                "_bigrams": set(zip(ts, ts[1:]))
+            }
+
+            KG10_CHUNKS[uri].append(chunk)
+            KG10_DF.update(chunk["_tokens"])
+            KG10_TOTAL += 1
+
+    print(f"Cached: {KG10_TOTAL} chunks / {len(KG10_CHUNKS)} documents")
+
+
+def idf(token):
+    return math.log(
+        (KG10_TOTAL + 1) /
+        (KG10_DF.get(token, 0) + 1)
+    ) + 1
+
+
+# ==========================================================
+# MAIN RETRIEVER
+# ==========================================================
+
+def top10_from_kg(query):
+
+    # 1. Query -> KG seed nodes
+    phrases = extract_query_entities(query)
+    seeds = link_entities(phrases) if phrases else []
+
+    if not seeds:
+        seeds = lexical_fallback(query, limit=8)
+
+    if not seeds:
+        print("No KG seed nodes found.")
+        return {"predictions": [{"data": []}]}
+
+    # 2. SPARQL / BFS multi-hop traversal
+    edges, _ = traverse(seeds)
+
+    # 3. Collect KG-grounded documents only
+    grounded_docs = set()
+
+    for e in edges:
+        if e["source"] in KG10_CHUNKS:
+            grounded_docs.add(e["source"])
+
+        if e["target"] in KG10_CHUNKS:
+            grounded_docs.add(e["target"])
+
+    # Seed itself may also be a document
+    for uri, _, _, _ in seeds:
+        if uri in KG10_CHUNKS:
+            grounded_docs.add(uri)
+
+    if not grounded_docs:
+        print("No KG-grounded documents found.")
+        return {"predictions": [{"data": []}]}
+
+    # 4. Prepare query once
+    query_tokens = tokens(query)
+    query_set = set(query_tokens)
+    query_bigrams = set(zip(query_tokens, query_tokens[1:]))
+
+    query_idf_total = (
+        sum(idf(t) for t in query_set)
+        or 1.0
+    )
+
+    # 5. Score ALL KG-grounded chunks
+    # Ranking = 100% QUERY relevance
+    candidates = []
+
+    for uri in grounded_docs:
+        for c in KG10_CHUNKS[uri]:
+
+            token_score = (
+                sum(
+                    idf(t)
+                    for t in query_set
+                    if t in c["_tokens"]
+                )
+                / query_idf_total
+            )
+
+            bigram_score = (
+                len(query_bigrams & c["_bigrams"])
+                / len(query_bigrams)
+                if query_bigrams else 0.0
+            )
+
+            query_score = (
+                0.85 * token_score +
+                0.15 * bigram_score
+            )
+
+            if query_score <= 0:
+                continue
+
+            candidates.append({
+                **c,
+                "_score": query_score,
+                "_query_score": query_score
+            })
+
+    if not candidates:
+        print("No query-relevant KG chunks found.")
+        return {"predictions": [{"data": []}]}
+
+    # ======================================================
+    # 6. GLOBAL GREEDY MMR TOP-10
+    # ======================================================
+
+    remaining = candidates.copy()
+    chosen = []
+    seen = set()
+    per_doc = defaultdict(int)
+
+    while len(chosen) < TOP_K and remaining:
+
+        # First chunk = highest query relevance
+        if not chosen:
+            best = max(
+                remaining,
+                key=lambda c: c["_score"]
+            )
+
+        # Next chunks = query relevance - similarity penalty
+        else:
+            best = max(
+                remaining,
+                key=lambda c:
+                    MMR_LAMBDA * c["_score"]
+                    - (1 - MMR_LAMBDA) * max(
+                        jaccard(c["_tokens"], s["_tokens"])
+                        for s in chosen
+                    )
+            )
+
+        remaining.remove(best)
+
+        key = re.sub(
+            r"\s+",
+            " ",
+            best["content"].lower()
+        ).strip()
+
+        # Exact duplicate
+        if key in seen:
+            continue
+
+        # Max 3 chunks from same document
+        if per_doc[best["doc_uri"]] >= MAX_PER_DOC:
+            continue
+
+        seen.add(key)
+        per_doc[best["doc_uri"]] += 1
+        chosen.append(best)
+
+    # 7. Fallback: fill to 10 if MAX_PER_DOC prevented it
+    if len(chosen) < TOP_K:
+
+        for c in sorted(
+            candidates,
+            key=lambda x: x["_score"],
+            reverse=True
+        ):
+            key = re.sub(
+                r"\s+",
+                " ",
+                c["content"].lower()
+            ).strip()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            chosen.append(c)
+
+            if len(chosen) == TOP_K:
+                break
+
+    # 8. Response
+    response_kg = {
+        "predictions": [{
+            "data": [{
+                "content": c["content"],
+                "title": c["title"],
+                "reference": c["reference"]
+            } for c in chosen]
+        }]
+    }
+
+    # 9. Clean final output — same style as previous code
+    print("\n" + "=" * 100)
+    print("TOP 10 KG CHUNKS — 100% QUERY RELEVANCE + GREEDY MMR")
+    print("=" * 100)
+
+    for i, c in enumerate(chosen, 1):
+        print(f"\nCHUNK {i}")
+        print("-" * 100)
+        print(f"Content   : {c['content']}")
+        print(f"Title     : {c['title']}")
+        print(f"Reference : {c['reference']}")
+        print("-" * 100)
+
+    return response_kg
+
+
+# ==========================================================
+# WRITE YOUR QUESTION HERE
+# ==========================================================
+
+QUERY_KG = (
+    "What is the current status of the BL53 analysis program, "
+    "and what does that imply?"
+)
+
+response_kg = top10_from_kg(QUERY_KG)
