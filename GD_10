@@ -1,0 +1,99 @@
+# ==========================================================
+# 6. GREEDY DESCENT / GREEDY TOP-10 SELECTION
+# ==========================================================
+
+remaining = candidates.copy()
+chosen = []
+seen = set()
+per_doc = defaultdict(int)
+
+while len(chosen) < TOP_K and remaining:
+
+    # Pick the remaining chunk with
+    # highest query relevance
+    best = max(
+        remaining,
+        key=lambda c: c["_score"]
+    )
+
+    remaining.remove(best)
+
+    key = re.sub(
+        r"\s+",
+        " ",
+        best["content"].lower()
+    ).strip()
+
+    # Exact duplicate
+    if key in seen:
+        continue
+
+    # Max 3 chunks from same document
+    if per_doc[best["doc_uri"]] >= MAX_PER_DOC:
+        continue
+
+    seen.add(key)
+    per_doc[best["doc_uri"]] += 1
+    chosen.append(best)
+
+
+# ==========================================================
+# 7. FALLBACK — FILL TO TOP 10
+# ==========================================================
+
+if len(chosen) < TOP_K:
+
+    for c in sorted(
+        candidates,
+        key=lambda x: x["_score"],
+        reverse=True
+    ):
+
+        key = re.sub(
+            r"\s+",
+            " ",
+            c["content"].lower()
+        ).strip()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        chosen.append(c)
+
+        if len(chosen) == TOP_K:
+            break
+
+
+# ==========================================================
+# 8. RESPONSE
+# ==========================================================
+
+response_kg = {
+    "predictions": [{
+        "data": [{
+            "content": c["content"],
+            "title": c["title"],
+            "reference": c["reference"]
+        } for c in chosen]
+    }]
+}
+
+
+# ==========================================================
+# 9. OUTPUT
+# ==========================================================
+
+print("\n" + "=" * 100)
+print("TOP 10 KG CHUNKS — GREEDY QUERY RELEVANCE")
+print("=" * 100)
+
+for i, c in enumerate(chosen, 1):
+
+    print(f"\nCHUNK {i}")
+    print("-" * 100)
+    print(f"Content   : {c['content']}")
+    print(f"Title     : {c['title']}")
+    print(f"Reference : {c['reference']}")
+    print(f"Score     : {c['_query_score']:.4f}")
+    print("-" * 100)
