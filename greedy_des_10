@@ -1,0 +1,96 @@
+# ==========================================================
+# GREEDY MMR TOP-10 SELECTION
+# ==========================================================
+
+MMR_LAMBDA = 0.80
+
+def jaccard(a, b):
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+# Use ALL scored KG candidate chunks
+remaining = []
+
+for final, qs, gs, c in scored:
+    remaining.append({
+        **c,
+        "_score": final,
+        "_query_score": qs,
+        "_graph_score": gs
+    })
+
+chosen = []
+seen = set()
+per_doc = defaultdict(int)
+
+while len(chosen) < TOP_K and remaining:
+
+    # First chunk = highest relevance
+    if not chosen:
+        best = max(remaining, key=lambda x: x["_score"])
+
+    else:
+        best = max(
+            remaining,
+            key=lambda c:
+                MMR_LAMBDA * c["_score"]
+                - (1 - MMR_LAMBDA) * max(
+                    jaccard(c["_tokens"], s["_tokens"])
+                    for s in chosen
+                )
+        )
+
+    remaining.remove(best)
+
+    key = re.sub(
+        r"\s+",
+        " ",
+        best["content"].lower()
+    ).strip()
+
+    # Exact duplicate
+    if key in seen:
+        continue
+
+    # Max 3 chunks/document
+    if per_doc[best["doc_uri"]] >= MAX_PER_DOC:
+        continue
+
+    seen.add(key)
+    per_doc[best["doc_uri"]] += 1
+    chosen.append(best)
+
+
+# ==========================================================
+# RESPONSE
+# ==========================================================
+
+response_kg = {
+    "predictions": [{
+        "data": [{
+            "content": c["content"],
+            "title": c["title"],
+            "reference": c["reference"]
+        } for c in chosen]
+    }]
+}
+
+
+# ==========================================================
+# CLEAN OUTPUT
+# ==========================================================
+
+print("\n" + "=" * 100)
+print("TOP 10 KG CHUNKS — GREEDY MMR")
+print("=" * 100)
+
+for i, c in enumerate(chosen, 1):
+    print(f"\nCHUNK {i}")
+    print("-" * 100)
+    print(f"Content   : {c['content']}")
+    print(f"Title     : {c['title']}")
+    print(f"Reference : {c['reference']}")
+    print(f"Final     : {c['_score']:.4f}")
+    print(f"Query     : {c['_query_score']:.4f}")
+    print(f"Graph     : {c['_graph_score']:.4f}")
+
+return response_kg
