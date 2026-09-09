@@ -1,96 +1,336 @@
 # ==========================================================
-# GREEDY MMR TOP-10 SELECTION
+# Cell 20 — KG-GROUNDED TOP-10 + GLOBAL GREEDY MMR
+# No embeddings · No vector search · No BM25
 # ==========================================================
 
+import re, math, heapq
+from collections import defaultdict, Counter
+
+TOP_K = 10
+KG10_MAX_DOCS = 15
+MAX_PER_DOC = 3
+CHUNK_SIZE, MIN_CHUNK = 900, 120
+
+QUERY_WEIGHT = 0.70
+GRAPH_WEIGHT = 0.30
 MMR_LAMBDA = 0.80
+
+STOP = {
+    "a","an","the","is","are","was","were","be","been","being",
+    "of","to","for","from","in","on","at","by","with","and","or",
+    "what","which","who","where","when","why","how",
+    "does","do","did","should","would","could","can","may","might"
+}
+
+MARKUP = re.compile(r"\[?<doc:(?:wiki:)?[^<>]+>\]?")
+
+def tokens(text):
+    return [
+        w for w in re.findall(r"[a-z0-9]+", str(text).lower())
+        if len(w) > 1 and w not in STOP
+    ]
+
+def split_chunks(text):
+    text = re.sub(r"\s+", " ", MARKUP.sub(" ", str(text or ""))).strip()
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    out, buf = [], ""
+
+    for s in sents:
+        if len(s) > CHUNK_SIZE:
+            if len(buf) >= MIN_CHUNK:
+                out.append(buf)
+            buf = ""
+            out += [
+                s[i:i+CHUNK_SIZE]
+                for i in range(0, len(s), CHUNK_SIZE)
+                if len(s[i:i+CHUNK_SIZE]) >= MIN_CHUNK
+            ]
+        elif len(buf) + len(s) + 1 <= CHUNK_SIZE:
+            buf = f"{buf} {s}".strip()
+        else:
+            if len(buf) >= MIN_CHUNK:
+                out.append(buf)
+            buf = s
+
+    if len(buf) >= MIN_CHUNK:
+        out.append(buf)
+
+    return out
 
 def jaccard(a, b):
     return len(a & b) / len(a | b) if a and b else 0.0
 
-# Use ALL scored KG candidate chunks
-remaining = []
 
-for final, qs, gs, c in scored:
-    remaining.append({
-        **c,
-        "_score": final,
-        "_query_score": qs,
-        "_graph_score": gs
-    })
+# ==========================================================
+# BUILD KG CHUNK INDEX ONCE
+# ==========================================================
 
-chosen = []
-seen = set()
-per_doc = defaultdict(int)
+if not all(k in globals() for k in ("KG10_CHUNKS","KG10_DF","KG10_TOTAL")):
 
-while len(chosen) < TOP_K and remaining:
+    DOC_Q = PREFIXES + """
+    SELECT ?doc ?label ?ref ?content WHERE {
+        ?doc ex:documentContent ?content .
+        OPTIONAL { ?doc rdfs:label ?label }
+        OPTIONAL { ?doc ex:sourceReference ?ref }
+    }
+    """
 
-    # First chunk = highest relevance
-    if not chosen:
-        best = max(remaining, key=lambda x: x["_score"])
+    KG10_CHUNKS = defaultdict(list)
+    KG10_DF = Counter()
+    KG10_TOTAL = 0
 
-    else:
-        best = max(
-            remaining,
-            key=lambda c:
-                MMR_LAMBDA * c["_score"]
-                - (1 - MMR_LAMBDA) * max(
-                    jaccard(c["_tokens"], s["_tokens"])
-                    for s in chosen
-                )
+    for r in g.query(DOC_Q):
+        uri = str(r.doc)
+        title = str(r.label) if r.label else NODE_LABEL.get(uri, uri)
+        reference = str(r.ref) if r.ref else uri
+
+        for text in split_chunks(r.content):
+            ts = tokens(text)
+
+            chunk = {
+                "content": text,
+                "title": title,
+                "reference": reference,
+                "doc_uri": uri,
+                "_tokens": set(ts),
+                "_bigrams": set(zip(ts, ts[1:]))
+            }
+
+            KG10_CHUNKS[uri].append(chunk)
+            KG10_DF.update(chunk["_tokens"])
+            KG10_TOTAL += 1
+
+    print(f"Cached: {KG10_TOTAL} chunks / {len(KG10_CHUNKS)} documents")
+
+
+def idf(token):
+    return math.log(
+        (KG10_TOTAL + 1) /
+        (KG10_DF.get(token, 0) + 1)
+    ) + 1
+
+
+# ==========================================================
+# MAIN RETRIEVER
+# ==========================================================
+
+def top10_from_kg(query):
+
+    # 1. Query -> KG seed nodes
+    phrases = extract_query_entities(query)
+    seeds = link_entities(phrases) if phrases else []
+
+    if not seeds:
+        seeds = lexical_fallback(query, limit=8)
+
+    if not seeds:
+        print("No KG seed nodes found.")
+        return {"predictions": [{"data": []}]}
+
+    # 2. SPARQL / BFS multi-hop traversal
+    edges, _ = traverse(seeds)
+
+    # 3. Graph evidence -> document score
+    support = defaultdict(list)
+
+    for e in edges:
+        graph_edge_score = (
+            (e["seed_score"] / 100.0)
+            * (e["strength"] / 10.0)
+            * (HOP_DECAY ** (e["hop"] - 1))
         )
 
-    remaining.remove(best)
+        if e["source"] in KG10_CHUNKS:
+            support[e["source"]].append(graph_edge_score)
 
-    key = re.sub(
-        r"\s+",
-        " ",
-        best["content"].lower()
-    ).strip()
+        if e["target"] in KG10_CHUNKS:
+            support[e["target"]].append(graph_edge_score)
 
-    # Exact duplicate
-    if key in seen:
-        continue
+    # Seed itself can also be a document
+    for uri, _, seed_score, _ in seeds:
+        if uri in KG10_CHUNKS:
+            support[uri].append(seed_score / 100.0)
 
-    # Max 3 chunks/document
-    if per_doc[best["doc_uri"]] >= MAX_PER_DOC:
-        continue
+    if not support:
+        print("No KG-grounded documents found.")
+        return {"predictions": [{"data": []}]}
 
-    seen.add(key)
-    per_doc[best["doc_uri"]] += 1
-    chosen.append(best)
+    # Strongest 3 graph evidence scores/document
+    doc_score = {
+        uri: sum(heapq.nlargest(3, scores))
+        for uri, scores in support.items()
+    }
+
+    # Top KG-grounded documents
+    docs = heapq.nlargest(
+        KG10_MAX_DOCS,
+        doc_score,
+        key=doc_score.get
+    )
+
+    max_graph = max(doc_score[d] for d in docs)
+    graph_norm = math.log1p(max_graph) or 1e-9
+
+    # 4. Prepare query once
+    query_tokens = tokens(query)
+    query_set = set(query_tokens)
+    query_bigrams = set(zip(query_tokens, query_tokens[1:]))
+
+    query_idf_total = (
+        sum(idf(t) for t in query_set)
+        or 1.0
+    )
+
+    # 5. Score ALL chunks from selected KG documents
+    candidates = []
+
+    for uri in docs:
+        graph_score = (
+            math.log1p(doc_score[uri]) /
+            graph_norm
+        )
+
+        for c in KG10_CHUNKS[uri]:
+
+            token_score = (
+                sum(
+                    idf(t)
+                    for t in query_set
+                    if t in c["_tokens"]
+                )
+                / query_idf_total
+            )
+
+            bigram_score = (
+                len(query_bigrams & c["_bigrams"])
+                / len(query_bigrams)
+                if query_bigrams else 0.0
+            )
+
+            query_score = (
+                0.85 * token_score +
+                0.15 * bigram_score
+            )
+
+            final_score = (
+                QUERY_WEIGHT * query_score +
+                GRAPH_WEIGHT * graph_score
+            )
+
+            candidates.append({
+                **c,
+                "_score": final_score,
+                "_query_score": query_score,
+                "_graph_score": graph_score
+            })
+
+    # ======================================================
+    # 6. GLOBAL GREEDY MMR TOP-10
+    # ======================================================
+
+    remaining = candidates.copy()
+    chosen = []
+    seen = set()
+    per_doc = defaultdict(int)
+
+    while len(chosen) < TOP_K and remaining:
+
+        # First chunk = highest relevance
+        if not chosen:
+            best = max(
+                remaining,
+                key=lambda c: c["_score"]
+            )
+
+        # Next chunks = relevance - similarity penalty
+        else:
+            best = max(
+                remaining,
+                key=lambda c:
+                    MMR_LAMBDA * c["_score"]
+                    - (1 - MMR_LAMBDA) * max(
+                        jaccard(c["_tokens"], s["_tokens"])
+                        for s in chosen
+                    )
+            )
+
+        remaining.remove(best)
+
+        key = re.sub(
+            r"\s+",
+            " ",
+            best["content"].lower()
+        ).strip()
+
+        # Exact duplicate
+        if key in seen:
+            continue
+
+        # Max 3 chunks from same document
+        if per_doc[best["doc_uri"]] >= MAX_PER_DOC:
+            continue
+
+        seen.add(key)
+        per_doc[best["doc_uri"]] += 1
+        chosen.append(best)
+
+    # 7. Fallback: fill to 10 if MAX_PER_DOC prevented it
+    if len(chosen) < TOP_K:
+
+        for c in sorted(
+            candidates,
+            key=lambda x: x["_score"],
+            reverse=True
+        ):
+            key = re.sub(
+                r"\s+",
+                " ",
+                c["content"].lower()
+            ).strip()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            chosen.append(c)
+
+            if len(chosen) == TOP_K:
+                break
+
+    # 8. Response
+    response_kg = {
+        "predictions": [{
+            "data": [{
+                "content": c["content"],
+                "title": c["title"],
+                "reference": c["reference"]
+            } for c in chosen]
+        }]
+    }
+
+    # 9. Clean final output
+    print("\n" + "=" * 100)
+    print("TOP 10 KG CHUNKS — GREEDY MMR")
+    print("=" * 100)
+
+    for i, c in enumerate(chosen, 1):
+        print(f"\nCHUNK {i}")
+        print("-" * 100)
+        print(f"Content   : {c['content']}")
+        print(f"Title     : {c['title']}")
+        print(f"Reference : {c['reference']}")
+        print("-" * 100)
+
+    return response_kg
 
 
 # ==========================================================
-# RESPONSE
+# WRITE YOUR QUESTION HERE
 # ==========================================================
 
-response_kg = {
-    "predictions": [{
-        "data": [{
-            "content": c["content"],
-            "title": c["title"],
-            "reference": c["reference"]
-        } for c in chosen]
-    }]
-}
+QUERY_KG = (
+    "What is the current status of the BL53 analysis program, "
+    "and what does that imply?"
+)
 
-
-# ==========================================================
-# CLEAN OUTPUT
-# ==========================================================
-
-print("\n" + "=" * 100)
-print("TOP 10 KG CHUNKS — GREEDY MMR")
-print("=" * 100)
-
-for i, c in enumerate(chosen, 1):
-    print(f"\nCHUNK {i}")
-    print("-" * 100)
-    print(f"Content   : {c['content']}")
-    print(f"Title     : {c['title']}")
-    print(f"Reference : {c['reference']}")
-    print(f"Final     : {c['_score']:.4f}")
-    print(f"Query     : {c['_query_score']:.4f}")
-    print(f"Graph     : {c['_graph_score']:.4f}")
-
-return response_kg
+response_kg = top10_from_kg(QUERY_KG)
