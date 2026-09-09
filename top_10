@@ -1,0 +1,856 @@
+# ==========================================================
+# Cell 19 — OPTIMIZED KG -> TOP-10 CHUNKS
+#
+# NO embeddings
+# NO vector search
+# NO BM25
+# NO LLM reranker
+#
+# Uses existing:
+#   extract_query_entities()
+#   link_entities()
+#   lexical_fallback()
+#   traverse()
+#   PREFIXES
+#   NODE_LABEL
+#   HOP_DECAY
+#   g
+# ==========================================================
+
+import re
+import math
+import heapq
+from collections import defaultdict, Counter
+
+
+# ----------------------------------------------------------
+# CONFIG
+# ----------------------------------------------------------
+
+TOP_K = 10
+
+CHUNK_SIZE = 900
+MIN_CHUNK = 120
+
+# We do not need to inspect every KG document.
+# First use graph evidence to restrict the candidate documents.
+MAX_DOCS = 15
+
+QUERY_WEIGHT = 0.70
+GRAPH_WEIGHT = 0.30
+
+# True = use your existing LLM entity extraction + KG linking.
+# False = completely deterministic lexical KG linking.
+USE_LLM_LINKING = True
+
+
+# ----------------------------------------------------------
+# TEXT UTILITIES
+# ----------------------------------------------------------
+
+STOPWORDS = {
+    "a", "an", "the",
+    "is", "are", "was", "were",
+    "be", "been", "being",
+
+    "of", "to", "for", "from",
+    "in", "on", "at", "by", "with",
+
+    "and", "or",
+
+    "what", "which", "who",
+    "where", "when", "why", "how",
+
+    "does", "do", "did",
+    "should", "would", "could",
+    "can", "may", "might"
+}
+
+
+MARKUP = re.compile(
+    r"\[?<doc:(?:wiki:)?[^<>]+>\]?"
+)
+
+
+def tokenize(text):
+
+    return [
+        w
+        for w in re.findall(
+            r"[a-z0-9]+",
+            str(text).lower()
+        )
+        if len(w) > 1
+        and w not in STOPWORDS
+    ]
+
+
+def make_bigrams(tokens):
+
+    return set(
+        zip(
+            tokens,
+            tokens[1:]
+        )
+    )
+
+
+def split_chunks(text):
+
+    # remove unresolved doc markup
+    text = MARKUP.sub(
+        " ",
+        str(text or "")
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    sentences = [
+        s.strip()
+        for s in re.split(
+            r"(?<=[.!?])\s+",
+            text
+        )
+        if s.strip()
+    ]
+
+    chunks = []
+
+    buffer = ""
+
+    for sentence in sentences:
+
+        # very large sentence
+        if len(sentence) > CHUNK_SIZE:
+
+            if buffer:
+                chunks.append(buffer)
+                buffer = ""
+
+            for i in range(
+                0,
+                len(sentence),
+                CHUNK_SIZE
+            ):
+                chunks.append(
+                    sentence[
+                        i:i + CHUNK_SIZE
+                    ]
+                )
+
+            continue
+
+        new_size = (
+            len(buffer)
+            + len(sentence)
+            + (1 if buffer else 0)
+        )
+
+        if new_size <= CHUNK_SIZE:
+
+            buffer = (
+                f"{buffer} {sentence}"
+            ).strip()
+
+        else:
+
+            if buffer:
+                chunks.append(buffer)
+
+            buffer = sentence
+
+    if buffer:
+        chunks.append(buffer)
+
+    return [
+        c
+        for c in chunks
+        if len(c) >= MIN_CHUNK
+    ]
+
+
+# ==========================================================
+# BUILD CHUNK INDEX ONLY ONCE
+# ==========================================================
+#
+# Important optimization:
+#
+# Don't:
+#
+#   query -> split all docs -> tokenize all docs
+#
+# every time.
+#
+# Build once and reuse.
+# ==========================================================
+
+if "KG_CHUNKS" not in globals():
+
+    DOC_QUERY = PREFIXES + """
+    SELECT
+        ?doc
+        ?label
+        ?ref
+        ?content
+
+    WHERE {
+
+        ?doc ex:documentContent ?content .
+
+        OPTIONAL {
+            ?doc rdfs:label ?label
+        }
+
+        OPTIONAL {
+            ?doc ex:sourceReference ?ref
+        }
+    }
+    """
+
+    KG_CHUNKS = defaultdict(list)
+
+    TOKEN_DF = Counter()
+
+    TOTAL_CHUNKS = 0
+
+
+    for row in g.query(DOC_QUERY):
+
+        uri = str(row.doc)
+
+        title = (
+            str(row.label)
+            if row.label
+            else NODE_LABEL.get(
+                uri,
+                uri
+            )
+        )
+
+        reference = (
+            str(row.ref)
+            if row.ref
+            else uri
+        )
+
+
+        for chunk_text in split_chunks(
+            row.content
+        ):
+
+            tokens = tokenize(
+                chunk_text
+            )
+
+            token_set = set(
+                tokens
+            )
+
+
+            chunk = {
+
+                "content":
+                    chunk_text,
+
+                "title":
+                    title,
+
+                "reference":
+                    reference,
+
+                "doc_uri":
+                    uri,
+
+                # cached
+                "_tokens":
+                    token_set,
+
+                "_bigrams":
+                    make_bigrams(tokens)
+            }
+
+
+            KG_CHUNKS[
+                uri
+            ].append(
+                chunk
+            )
+
+
+            # document frequency
+            TOKEN_DF.update(
+                token_set
+            )
+
+            TOTAL_CHUNKS += 1
+
+
+    print(
+        f"Chunk index cached: "
+        f"{TOTAL_CHUNKS} chunks / "
+        f"{len(KG_CHUNKS)} documents"
+    )
+
+
+# ==========================================================
+# IDF
+# ==========================================================
+
+def idf(token):
+
+    return (
+        math.log(
+            (TOTAL_CHUNKS + 1)
+            /
+            (
+                TOKEN_DF.get(
+                    token,
+                    0
+                )
+                + 1
+            )
+        )
+        + 1
+    )
+
+
+# ==========================================================
+# QUERY -> CHUNK SCORE
+# ==========================================================
+
+def query_chunk_score(
+    chunk,
+    query_tokens
+):
+
+    query_set = set(
+        query_tokens
+    )
+
+
+    # ---------------------------------------------
+    # 1. IDF weighted query term coverage
+    # ---------------------------------------------
+
+    denominator = sum(
+        idf(t)
+        for t in query_set
+    ) or 1.0
+
+
+    token_coverage = (
+
+        sum(
+            idf(t)
+
+            for t in query_set
+
+            if t
+            in chunk["_tokens"]
+        )
+
+        / denominator
+    )
+
+
+    # ---------------------------------------------
+    # 2. Query bigram match
+    # ---------------------------------------------
+
+    query_bigrams = make_bigrams(
+        query_tokens
+    )
+
+
+    if query_bigrams:
+
+        bigram_score = (
+
+            len(
+                query_bigrams
+                &
+                chunk["_bigrams"]
+            )
+
+            /
+            len(
+                query_bigrams
+            )
+        )
+
+    else:
+
+        bigram_score = 0.0
+
+
+    # ---------------------------------------------
+    # final query relevance
+    # ---------------------------------------------
+
+    return (
+
+        0.85
+        * token_coverage
+
+        +
+
+        0.15
+        * bigram_score
+    )
+
+
+# ==========================================================
+# MAIN RETRIEVER
+# ==========================================================
+
+def top10_from_kg(query):
+
+
+    # ------------------------------------------------------
+    # STEP 1
+    # Query -> KG seed nodes
+    # ------------------------------------------------------
+
+    if USE_LLM_LINKING:
+
+        phrases = (
+            extract_query_entities(
+                query
+            )
+        )
+
+        seeds = (
+            link_entities(
+                phrases
+            )
+            if phrases
+            else []
+        )
+
+    else:
+
+        seeds = []
+
+
+    # fallback if entity linking fails
+
+    if not seeds:
+
+        seeds = lexical_fallback(
+            query,
+            limit=8
+        )
+
+
+    if not seeds:
+
+        print(
+            "No KG seed nodes found."
+        )
+
+        return {
+            "predictions": [{
+                "data": []
+            }]
+        }
+
+
+    # ------------------------------------------------------
+    # STEP 2
+    # KG traversal
+    # ------------------------------------------------------
+
+    edges, visited = traverse(
+        seeds
+    )
+
+
+    # ------------------------------------------------------
+    # STEP 3
+    # GRAPH EVIDENCE PER DOCUMENT
+    # ------------------------------------------------------
+
+    doc_support = defaultdict(
+        list
+    )
+
+
+    for edge in edges:
+
+
+        graph_edge_score = (
+
+            edge["seed_score"]
+            / 100.0
+
+            *
+
+            edge["strength"]
+            / 10.0
+
+            *
+
+            (
+                HOP_DECAY
+                **
+                (
+                    edge["hop"]
+                    - 1
+                )
+            )
+        )
+
+
+        source = edge[
+            "source"
+        ]
+
+        target = edge[
+            "target"
+        ]
+
+
+        if source in KG_CHUNKS:
+
+            doc_support[
+                source
+            ].append(
+                graph_edge_score
+            )
+
+
+        if target in KG_CHUNKS:
+
+            doc_support[
+                target
+            ].append(
+                graph_edge_score
+            )
+
+
+    # seed itself may be a document
+
+    for (
+        uri,
+        _label,
+        seed_score,
+        _phrase
+    ) in seeds:
+
+
+        if uri in KG_CHUNKS:
+
+            doc_support[
+                uri
+            ].append(
+                seed_score
+                / 100.0
+            )
+
+
+    if not doc_support:
+
+        print(
+            "No KG-grounded documents found."
+        )
+
+        return {
+            "predictions": [{
+                "data": []
+            }]
+        }
+
+
+    # ------------------------------------------------------
+    # STEP 4
+    # DOCUMENT SCORE
+    #
+    # Use strongest 3 supporting edges.
+    #
+    # Why?
+    #
+    # Prevent huge / highly-connected documents
+    # from winning simply because they have many edges.
+    # ------------------------------------------------------
+
+    doc_score = {}
+
+
+    for uri, scores in doc_support.items():
+
+        strongest = heapq.nlargest(
+            3,
+            scores
+        )
+
+        doc_score[
+            uri
+        ] = sum(
+            strongest
+        )
+
+
+    # ------------------------------------------------------
+    # Keep only strongest KG documents
+    # ------------------------------------------------------
+
+    candidate_docs = heapq.nlargest(
+
+        MAX_DOCS,
+
+        doc_score,
+
+        key=doc_score.get
+    )
+
+
+    max_graph_score = max(
+
+        doc_score[
+            uri
+        ]
+
+        for uri
+        in candidate_docs
+    )
+
+
+    # ------------------------------------------------------
+    # STEP 5
+    # Query-aware ranking of chunks
+    # ------------------------------------------------------
+
+    query_tokens = tokenize(
+        query
+    )
+
+
+    scored_chunks = []
+
+
+    for uri in candidate_docs:
+
+
+        # normalize graph score 0 -> 1
+
+        graph_score = (
+
+            math.log1p(
+                doc_score[uri]
+            )
+
+            /
+
+            math.log1p(
+                max_graph_score
+            )
+        )
+
+
+        for chunk in KG_CHUNKS[
+            uri
+        ]:
+
+
+            query_score = (
+                query_chunk_score(
+                    chunk,
+                    query_tokens
+                )
+            )
+
+
+            final_score = (
+
+                QUERY_WEIGHT
+                * query_score
+
+                +
+
+                GRAPH_WEIGHT
+                * graph_score
+            )
+
+
+            scored_chunks.append((
+
+                final_score,
+
+                query_score,
+
+                graph_score,
+
+                chunk
+            ))
+
+
+    # ------------------------------------------------------
+    # STEP 6
+    # FAST TOP CANDIDATES
+    #
+    # heapq instead of sorting the complete list
+    # ------------------------------------------------------
+
+    pool = heapq.nlargest(
+
+        min(
+            40,
+            len(scored_chunks)
+        ),
+
+        scored_chunks,
+
+        key=lambda x: (
+            x[0],
+            x[1],
+            x[2]
+        )
+    )
+
+
+    # ------------------------------------------------------
+    # STEP 7
+    # exact duplicate removal + TOP 10
+    # ------------------------------------------------------
+
+    chosen = []
+
+    seen = set()
+
+
+    for (
+        final_score,
+        query_score,
+        graph_score,
+        chunk
+    ) in pool:
+
+
+        key = (
+            chunk["content"]
+            .strip()
+            .lower()
+        )
+
+
+        if key in seen:
+
+            continue
+
+
+        seen.add(
+            key
+        )
+
+
+        chosen.append({
+
+            **chunk,
+
+            "_score":
+                final_score,
+
+            "_query_score":
+                query_score,
+
+            "_graph_score":
+                graph_score
+        })
+
+
+        if len(
+            chosen
+        ) == TOP_K:
+
+            break
+
+
+    # ------------------------------------------------------
+    # PRINT TOP 10
+    # ------------------------------------------------------
+
+    print(
+        f"\nQuery: {query}"
+    )
+
+    print(
+        f"Seeds       : {len(seeds)}"
+    )
+
+    print(
+        f"Edges       : {len(edges)}"
+    )
+
+    print(
+        f"KG docs     : {len(candidate_docs)}"
+    )
+
+    print(
+        f"Top chunks  : {len(chosen)}\n"
+    )
+
+
+    for i, c in enumerate(
+        chosen,
+        1
+    ):
+
+        print(
+
+            f"{i:2d}. "
+
+            f"FINAL={c['_score']:.4f} | "
+
+            f"QUERY={c['_query_score']:.4f} | "
+
+            f"GRAPH={c['_graph_score']:.4f} | "
+
+            f"{c['title'][:55]}"
+        )
+
+
+    # ------------------------------------------------------
+    # RESPONSE
+    # ------------------------------------------------------
+
+    return {
+
+        "predictions": [{
+
+            "data": [
+
+                {
+
+                    "content":
+                        c["content"],
+
+                    "title":
+                        c["title"],
+
+                    "reference":
+                        c["reference"]
+                }
+
+                for c
+                in chosen
+            ]
+        }]
+    }
+
+
+# ==========================================================
+# RUN
+# ==========================================================
+
+QUERY_KG = (
+    "What type of documents does IntelliSearch allow users to find, "
+    "and what are these documents used for?"
+)
+
+response_kg = top10_from_kg(
+    QUERY_KG
+)
