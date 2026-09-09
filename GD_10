@@ -1,53 +1,388 @@
 # ==========================================================
-# 6. GREEDY DESCENT / GREEDY TOP-10 SELECTION
+# Cell 20 — KG TOP-10 USING GREEDY DESCENT
+# Greedy graph traversal + 100% query-based chunk ranking
+# No embeddings · No vector search · No BM25
 # ==========================================================
 
-remaining = candidates.copy()
-chosen = []
-seen = set()
-per_doc = defaultdict(int)
+import re, math
+from collections import defaultdict, Counter
 
-while len(chosen) < TOP_K and remaining:
+TOP_K = 10
+MAX_PER_DOC = 3
+CHUNK_SIZE, MIN_CHUNK = 900, 120
 
-    # Pick the remaining chunk with
-    # highest query relevance
-    best = max(
-        remaining,
-        key=lambda c: c["_score"]
+# Same depth as your KG traversal if MAX_HOP already exists
+GREEDY_MAX_STEPS = globals().get("MAX_HOP", 2)
+
+STOP = {
+    "a","an","the","is","are","was","were","be","been","being",
+    "of","to","for","from","in","on","at","by","with","and","or",
+    "what","which","who","where","when","why","how",
+    "does","do","did","should","would","could","can","may","might"
+}
+
+MARKUP = re.compile(r"\[?<doc:(?:wiki:)?[^<>]+>\]?")
+
+def tokens(text):
+    return [
+        w for w in re.findall(r"[a-z0-9]+", str(text).lower())
+        if len(w) > 1 and w not in STOP
+    ]
+
+def split_chunks(text):
+    text = re.sub(r"\s+", " ", MARKUP.sub(" ", str(text or ""))).strip()
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    out, buf = [], ""
+
+    for s in sents:
+        if len(s) > CHUNK_SIZE:
+            if len(buf) >= MIN_CHUNK:
+                out.append(buf)
+            buf = ""
+            out += [
+                s[i:i+CHUNK_SIZE]
+                for i in range(0, len(s), CHUNK_SIZE)
+                if len(s[i:i+CHUNK_SIZE]) >= MIN_CHUNK
+            ]
+        elif len(buf) + len(s) + 1 <= CHUNK_SIZE:
+            buf = f"{buf} {s}".strip()
+        else:
+            if len(buf) >= MIN_CHUNK:
+                out.append(buf)
+            buf = s
+
+    if len(buf) >= MIN_CHUNK:
+        out.append(buf)
+
+    return out
+
+
+# ==========================================================
+# BUILD KG CHUNK INDEX ONCE
+# ==========================================================
+
+if not all(k in globals() for k in ("KG10_CHUNKS","KG10_DF","KG10_TOTAL")):
+
+    DOC_Q = PREFIXES + """
+    SELECT ?doc ?label ?ref ?content WHERE {
+        ?doc ex:documentContent ?content .
+        OPTIONAL { ?doc rdfs:label ?label }
+        OPTIONAL { ?doc ex:sourceReference ?ref }
+    }
+    """
+
+    KG10_CHUNKS = defaultdict(list)
+    KG10_DF = Counter()
+    KG10_TOTAL = 0
+
+    for r in g.query(DOC_Q):
+        uri = str(r.doc)
+        title = str(r.label) if r.label else NODE_LABEL.get(uri, uri)
+        reference = str(r.ref) if r.ref else uri
+
+        for text in split_chunks(r.content):
+            ts = tokens(text)
+
+            chunk = {
+                "content": text,
+                "title": title,
+                "reference": reference,
+                "doc_uri": uri,
+                "_tokens": set(ts),
+                "_bigrams": set(zip(ts, ts[1:]))
+            }
+
+            KG10_CHUNKS[uri].append(chunk)
+            KG10_DF.update(chunk["_tokens"])
+            KG10_TOTAL += 1
+
+    print(f"Cached: {KG10_TOTAL} chunks / {len(KG10_CHUNKS)} documents")
+
+
+def idf(token):
+    return math.log(
+        (KG10_TOTAL + 1) /
+        (KG10_DF.get(token, 0) + 1)
+    ) + 1
+
+
+# ==========================================================
+# QUERY -> CHUNK SCORE
+# 100% QUERY RELEVANCE
+# ==========================================================
+
+def chunk_query_score(c, query_set, query_bigrams, query_idf_total):
+
+    token_score = (
+        sum(
+            idf(t)
+            for t in query_set
+            if t in c["_tokens"]
+        )
+        / query_idf_total
     )
 
-    remaining.remove(best)
+    bigram_score = (
+        len(query_bigrams & c["_bigrams"])
+        / len(query_bigrams)
+        if query_bigrams else 0.0
+    )
 
-    key = re.sub(
-        r"\s+",
-        " ",
-        best["content"].lower()
-    ).strip()
-
-    # Exact duplicate
-    if key in seen:
-        continue
-
-    # Max 3 chunks from same document
-    if per_doc[best["doc_uri"]] >= MAX_PER_DOC:
-        continue
-
-    seen.add(key)
-    per_doc[best["doc_uri"]] += 1
-    chosen.append(best)
+    return (
+        0.85 * token_score +
+        0.15 * bigram_score
+    )
 
 
 # ==========================================================
-# 7. FALLBACK — FILL TO TOP 10
+# ONE-HOP KG NEIGHBOURS
+# Both directions
 # ==========================================================
 
-if len(chosen) < TOP_K:
+def greedy_neighbors(uri):
 
-    for c in sorted(
-        candidates,
-        key=lambda x: x["_score"],
+    q = PREFIXES + f"""
+    SELECT DISTINCT ?neighbor ?strength WHERE {{
+
+        {{
+            ?stmt rdf:subject <{uri}> ;
+                  rdf:object ?neighbor .
+
+            OPTIONAL {{
+                ?stmt ex:strength ?strength
+            }}
+        }}
+
+        UNION
+
+        {{
+            ?stmt rdf:subject ?neighbor ;
+                  rdf:object <{uri}> .
+
+            OPTIONAL {{
+                ?stmt ex:strength ?strength
+            }}
+        }}
+
+        FILTER(isIRI(?neighbor))
+    }}
+    """
+
+    out = []
+
+    for r in g.query(q):
+
+        neighbor = str(r.neighbor)
+
+        try:
+            strength = float(r.strength) if r.strength else 5.0
+        except:
+            strength = 5.0
+
+        out.append({
+            "uri": neighbor,
+            "strength": strength
+        })
+
+    return out
+
+
+# ==========================================================
+# SCORE A KG NODE AGAINST QUERY
+# ==========================================================
+
+def node_query_score(uri, query_set, query_bigrams, query_idf_total):
+
+    # If node is a document, use its best matching chunk
+    if uri in KG10_CHUNKS:
+
+        scores = [
+            chunk_query_score(
+                c,
+                query_set,
+                query_bigrams,
+                query_idf_total
+            )
+            for c in KG10_CHUNKS[uri]
+        ]
+
+        return max(scores) if scores else 0.0
+
+    # Otherwise use KG node label
+    label = NODE_LABEL.get(uri, uri)
+    node_tokens = set(tokens(label))
+
+    if not node_tokens:
+        return 0.0
+
+    matched = sum(
+        idf(t)
+        for t in query_set
+        if t in node_tokens
+    )
+
+    return matched / query_idf_total
+
+
+# ==========================================================
+# GREEDY DESCENT
+#
+# Current node
+#     ↓
+# inspect neighbors
+#     ↓
+# choose locally best neighbor
+#     ↓
+# move there
+#     ↓
+# repeat
+# ==========================================================
+
+def greedy_descent(seed_uri, query_set, query_bigrams, query_idf_total):
+
+    current = seed_uri
+    visited = {current}
+    path = [current]
+    documents = set()
+
+    if current in KG10_CHUNKS:
+        documents.add(current)
+
+    for _ in range(GREEDY_MAX_STEPS):
+
+        neighbors = [
+            n for n in greedy_neighbors(current)
+            if n["uri"] not in visited
+        ]
+
+        if not neighbors:
+            break
+
+        # Score every local neighbor
+        for n in neighbors:
+
+            query_score = node_query_score(
+                n["uri"],
+                query_set,
+                query_bigrams,
+                query_idf_total
+            )
+
+            edge_strength = min(
+                max(n["strength"] / 10.0, 0.0),
+                1.0
+            )
+
+            # Query relevance mainly drives the descent.
+            # Edge strength helps choose stronger graph paths.
+            n["_greedy_score"] = (
+                0.85 * query_score +
+                0.15 * edge_strength
+            )
+
+        # GREEDY DECISION:
+        # move only to the locally best neighbor
+        best = max(
+            neighbors,
+            key=lambda n: n["_greedy_score"]
+        )
+
+        current = best["uri"]
+        visited.add(current)
+        path.append(current)
+
+        if current in KG10_CHUNKS:
+            documents.add(current)
+
+    return path, documents
+
+
+# ==========================================================
+# MAIN RETRIEVER
+# ==========================================================
+
+def top10_from_kg_greedy_descent(query):
+
+    # 1. Query -> KG seeds
+    phrases = extract_query_entities(query)
+    seeds = link_entities(phrases) if phrases else []
+
+    if not seeds:
+        seeds = lexical_fallback(query, limit=8)
+
+    if not seeds:
+        print("No KG seed nodes found.")
+        return {"predictions": [{"data": []}]}
+
+    # 2. Prepare query
+    query_tokens = tokens(query)
+    query_set = set(query_tokens)
+    query_bigrams = set(zip(query_tokens, query_tokens[1:]))
+
+    query_idf_total = (
+        sum(idf(t) for t in query_set)
+        or 1.0
+    )
+
+    # 3. Greedy descent from every seed
+    grounded_docs = set()
+    greedy_paths = []
+
+    for uri, _, _, _ in seeds:
+
+        path, docs = greedy_descent(
+            uri,
+            query_set,
+            query_bigrams,
+            query_idf_total
+        )
+
+        greedy_paths.append(path)
+        grounded_docs.update(docs)
+
+    if not grounded_docs:
+        print("Greedy descent found no KG-grounded documents.")
+        return {"predictions": [{"data": []}]}
+
+    # 4. Score chunks from Greedy-reached documents
+    # Final ranking = 100% query relevance
+    candidates = []
+
+    for uri in grounded_docs:
+
+        for c in KG10_CHUNKS[uri]:
+
+            query_score = chunk_query_score(
+                c,
+                query_set,
+                query_bigrams,
+                query_idf_total
+            )
+
+            if query_score <= 0:
+                continue
+
+            candidates.append({
+                **c,
+                "_score": query_score,
+                "_query_score": query_score
+            })
+
+    if not candidates:
+        print("No query-relevant chunks found.")
+        return {"predictions": [{"data": []}]}
+
+    # 5. Pure Top-K after Greedy Descent
+    candidates.sort(
+        key=lambda c: c["_score"],
         reverse=True
-    ):
+    )
+
+    chosen = []
+    seen = set()
+    per_doc = defaultdict(int)
+
+    for c in candidates:
 
         key = re.sub(
             r"\s+",
@@ -58,42 +393,80 @@ if len(chosen) < TOP_K:
         if key in seen:
             continue
 
+        if per_doc[c["doc_uri"]] >= MAX_PER_DOC:
+            continue
+
         seen.add(key)
+        per_doc[c["doc_uri"]] += 1
         chosen.append(c)
 
         if len(chosen) == TOP_K:
             break
 
+    # Fallback if document limit gives fewer than 10
+    if len(chosen) < TOP_K:
+
+        for c in candidates:
+
+            key = re.sub(
+                r"\s+",
+                " ",
+                c["content"].lower()
+            ).strip()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            chosen.append(c)
+
+            if len(chosen) == TOP_K:
+                break
+
+    # 6. Response
+    response_kg = {
+        "predictions": [{
+            "data": [{
+                "content": c["content"],
+                "title": c["title"],
+                "reference": c["reference"]
+            } for c in chosen]
+        }]
+    }
+
+    # 7. Output
+    print("\n" + "=" * 100)
+    print("TOP 10 KG CHUNKS — GREEDY DESCENT")
+    print("=" * 100)
+
+    print("\nGREEDY PATHS")
+    for i, path in enumerate(greedy_paths, 1):
+        labels = [
+            NODE_LABEL.get(uri, uri)
+            for uri in path
+        ]
+        print(f"Seed {i}: {' -> '.join(labels)}")
+
+    for i, c in enumerate(chosen, 1):
+
+        print(f"\nCHUNK {i}")
+        print("-" * 100)
+        print(f"Content   : {c['content']}")
+        print(f"Title     : {c['title']}")
+        print(f"Reference : {c['reference']}")
+        print(f"Score     : {c['_query_score']:.4f}")
+        print("-" * 100)
+
+    return response_kg
+
 
 # ==========================================================
-# 8. RESPONSE
+# WRITE YOUR QUESTION HERE
 # ==========================================================
 
-response_kg = {
-    "predictions": [{
-        "data": [{
-            "content": c["content"],
-            "title": c["title"],
-            "reference": c["reference"]
-        } for c in chosen]
-    }]
-}
+QUERY_KG = (
+    "What is the current status of the BL53 analysis program, "
+    "and what does that imply?"
+)
 
-
-# ==========================================================
-# 9. OUTPUT
-# ==========================================================
-
-print("\n" + "=" * 100)
-print("TOP 10 KG CHUNKS — GREEDY QUERY RELEVANCE")
-print("=" * 100)
-
-for i, c in enumerate(chosen, 1):
-
-    print(f"\nCHUNK {i}")
-    print("-" * 100)
-    print(f"Content   : {c['content']}")
-    print(f"Title     : {c['title']}")
-    print(f"Reference : {c['reference']}")
-    print(f"Score     : {c['_query_score']:.4f}")
-    print("-" * 100)
+response_kg = top10_from_kg_greedy_descent(QUERY_KG)
