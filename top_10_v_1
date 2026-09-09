@@ -1,0 +1,249 @@
+# ==========================================================
+# Cell 20 — KG-GROUNDED QUERY-AWARE TOP-10 CHUNK RETRIEVER
+# No embeddings · No vector search · No BM25
+# ==========================================================
+
+import re, math, heapq
+from collections import defaultdict, Counter
+
+TOP_K, KG10_MAX_DOCS, MAX_PER_DOC, POOL_SIZE = 10, 15, 3, 100
+CHUNK_SIZE, MIN_CHUNK = 900, 120
+QUERY_WEIGHT, GRAPH_WEIGHT = 0.70, 0.30
+
+STOP = {
+    "a","an","the","is","are","was","were","be","been","being",
+    "of","to","for","from","in","on","at","by","with","and","or",
+    "what","which","who","where","when","why","how",
+    "does","do","did","should","would","could","can","may","might"
+}
+
+MARKUP = re.compile(r"\[?<doc:(?:wiki:)?[^<>]+>\]?")
+
+def tokens(text):
+    return [w for w in re.findall(r"[a-z0-9]+", str(text).lower())
+            if len(w) > 1 and w not in STOP]
+
+def split_chunks(text):
+    text = re.sub(r"\s+", " ", MARKUP.sub(" ", str(text or ""))).strip()
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    out, buf = [], ""
+
+    for s in sents:
+        if len(s) > CHUNK_SIZE:
+            if len(buf) >= MIN_CHUNK: out.append(buf)
+            buf = ""
+            out += [s[i:i+CHUNK_SIZE] for i in range(0, len(s), CHUNK_SIZE)
+                    if len(s[i:i+CHUNK_SIZE]) >= MIN_CHUNK]
+        elif len(buf) + len(s) + 1 <= CHUNK_SIZE:
+            buf = f"{buf} {s}".strip()
+        else:
+            if len(buf) >= MIN_CHUNK: out.append(buf)
+            buf = s
+
+    if len(buf) >= MIN_CHUNK: out.append(buf)
+    return out
+
+# Build chunk index once
+if not all(k in globals() for k in ("KG10_CHUNKS","KG10_DF","KG10_TOTAL")):
+
+    DOC_Q = PREFIXES + """
+    SELECT ?doc ?label ?ref ?content WHERE {
+        ?doc ex:documentContent ?content .
+        OPTIONAL { ?doc rdfs:label ?label }
+        OPTIONAL { ?doc ex:sourceReference ?ref }
+    }
+    """
+
+    KG10_CHUNKS, KG10_DF, KG10_TOTAL = defaultdict(list), Counter(), 0
+
+    for r in g.query(DOC_Q):
+        uri = str(r.doc)
+        title = str(r.label) if r.label else NODE_LABEL.get(uri, uri)
+        ref = str(r.ref) if r.ref else uri
+
+        for text in split_chunks(r.content):
+            ts = tokens(text)
+
+            item = {
+                "content": text,
+                "title": title,
+                "reference": ref,
+                "doc_uri": uri,
+                "_tokens": set(ts),
+                "_bigrams": set(zip(ts, ts[1:]))
+            }
+
+            KG10_CHUNKS[uri].append(item)
+            KG10_DF.update(item["_tokens"])
+            KG10_TOTAL += 1
+
+    print(f"Cached: {KG10_TOTAL} chunks / {len(KG10_CHUNKS)} docs")
+
+def idf(t):
+    return math.log((KG10_TOTAL + 1) / (KG10_DF.get(t, 0) + 1)) + 1
+
+def top10_from_kg(query):
+
+    # 1. Query -> KG seeds
+    phrases = extract_query_entities(query)
+    seeds = link_entities(phrases) if phrases else []
+
+    if not seeds:
+        seeds = lexical_fallback(query, limit=8)
+
+    if not seeds:
+        return {"predictions":[{"data":[]}]}
+
+    # 2. KG traversal
+    edges, _ = traverse(seeds)
+
+    # 3. Graph evidence
+    support = defaultdict(list)
+
+    for e in edges:
+        s = (
+            (e["seed_score"]/100.0)
+            * (e["strength"]/10.0)
+            * (HOP_DECAY ** (e["hop"]-1))
+        )
+
+        if e["source"] in KG10_CHUNKS:
+            support[e["source"]].append(s)
+
+        if e["target"] in KG10_CHUNKS:
+            support[e["target"]].append(s)
+
+    for uri, _, score, _ in seeds:
+        if uri in KG10_CHUNKS:
+            support[uri].append(score/100.0)
+
+    if not support:
+        return {"predictions":[{"data":[]}]}
+
+    # 4. Top KG documents
+    doc_score = {
+        uri: sum(heapq.nlargest(3, scores))
+        for uri, scores in support.items()
+    }
+
+    docs = heapq.nlargest(
+        KG10_MAX_DOCS,
+        doc_score,
+        key=doc_score.get
+    )
+
+    graph_norm = math.log1p(max(doc_score[d] for d in docs)) or 1e-9
+
+    # 5. Prepare query
+    qt = tokens(query)
+    qs = set(qt)
+    qb = set(zip(qt, qt[1:]))
+    qidf = sum(idf(t) for t in qs) or 1.0
+
+    # 6. Score chunks
+    scored = []
+
+    for uri in docs:
+        gs = math.log1p(doc_score[uri]) / graph_norm
+
+        for c in KG10_CHUNKS[uri]:
+
+            token_score = sum(
+                idf(t) for t in qs if t in c["_tokens"]
+            ) / qidf
+
+            bigram_score = (
+                len(qb & c["_bigrams"]) / len(qb)
+                if qb else 0.0
+            )
+
+            qscore = 0.85 * token_score + 0.15 * bigram_score
+            final = QUERY_WEIGHT * qscore + GRAPH_WEIGHT * gs
+
+            scored.append((final, qscore, gs, c))
+
+    # 7. Top candidate pool
+    pool = heapq.nlargest(
+        min(POOL_SIZE, len(scored)),
+        scored,
+        key=lambda x: (x[0], x[1], x[2])
+    )
+
+    # 8. Dedup + max 3 chunks/document
+    chosen, seen, per_doc = [], set(), defaultdict(int)
+
+    for final, qs, gs, c in pool:
+
+        key = re.sub(r"\s+", " ", c["content"].lower()).strip()
+
+        if key in seen:
+            continue
+
+        if per_doc[c["doc_uri"]] >= MAX_PER_DOC:
+            continue
+
+        seen.add(key)
+        per_doc[c["doc_uri"]] += 1
+
+        chosen.append({
+            **c,
+            "_score": final,
+            "_query_score": qs,
+            "_graph_score": gs
+        })
+
+        if len(chosen) == TOP_K:
+            break
+
+    # Fill if fewer than 10
+    if len(chosen) < TOP_K:
+        for final, qs, gs, c in pool:
+
+            key = re.sub(r"\s+", " ", c["content"].lower()).strip()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            chosen.append({
+                **c,
+                "_score": final,
+                "_query_score": qs,
+                "_graph_score": gs
+            })
+
+            if len(chosen) == TOP_K:
+                break
+
+    # Response
+    response = {
+        "predictions":[{
+            "data":[{
+                "content": c["content"],
+                "title": c["title"],
+                "reference": c["reference"]
+            } for c in chosen]
+        }]
+    }
+
+    # Clean output format
+    print("\n" + "="*100)
+    print("TOP 10 KG CHUNKS")
+    print("="*100)
+
+    for i, c in enumerate(chosen, 1):
+        print(f"\nCHUNK {i}")
+        print("-"*100)
+        print(f"Content   : {c['content']}")
+        print(f"Title     : {c['title']}")
+        print(f"Reference : {c['reference']}")
+        print("-"*100)
+
+    return response
+
+
+# RUN
+QUERY_KG = "What is the current status of the BL53 analysis program, and what does that imply?"
+
+response_kg = top10_from_kg(QUERY_KG)
