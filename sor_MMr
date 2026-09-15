@@ -1,0 +1,217 @@
+# ==========================================================
+# CELL 20 — GRAPH-AWARE KG TOP-10 (COMPACT)
+# Reuses Cells 14–17: extract_query_entities, link_entities,
+# lexical_fallback, traverse, rank_edges, fuzzy_match, MAX_HOPS.
+# Same logic/output: KG -> 2-Hop -> scoring -> MMR -> Top 10
+# ==========================================================
+
+TOP_K, MAX_PER_DOC, TOP_EDGES_PER_DOC = 10, 3, 5
+CHUNK_SIZE, MIN_CHUNK, MMR_LAMBDA = 900, 120, 0.82
+W_QUERY, W_LOCAL_GRAPH, W_DOC_GRAPH = 0.45, 0.35, 0.20
+
+STOP = {"a","an","the","is","are","was","were","be","been","being",
+        "of","to","for","from","in","on","at","by","with","and","or",
+        "what","which","who","where","when","why","how","does","do","did",
+        "should","would","could","can","may","might"}
+MARKUP = re.compile(r"\[?<doc:(?:wiki:)?[^<>]+>\]?")
+
+
+def tokens(text):
+    return {w for w in re.findall(r"[a-z0-9]+", str(text or "").lower())
+            if len(w) > 1 and w not in STOP}
+
+
+def split_chunks(text):
+    text = re.sub(r"\s+", " ", MARKUP.sub(" ", str(text or ""))).strip()
+    if not text:
+        return []
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    chunks, buf = [], ""
+    for s in sents:
+        if len(s) > CHUNK_SIZE:
+            if len(buf) >= MIN_CHUNK:
+                chunks.append(buf)
+            buf = ""
+            for i in range(0, len(s), CHUNK_SIZE):
+                part = s[i:i + CHUNK_SIZE].strip()
+                if len(part) >= MIN_CHUNK:
+                    chunks.append(part)
+        elif len(buf) + len(s) + 1 <= CHUNK_SIZE:
+            buf = f"{buf} {s}".strip()
+        else:
+            if len(buf) >= MIN_CHUNK:
+                chunks.append(buf)
+            buf = s
+    if len(buf) >= MIN_CHUNK:
+        chunks.append(buf)
+    return chunks
+
+
+# ------------------------- BUILD CHUNK INDEX -------------------------
+DOC_Q = PREFIXES + """
+SELECT ?doc ?label ?ref ?content WHERE {
+  ?doc ex:documentContent ?content .
+  OPTIONAL { ?doc rdfs:label ?label }
+  OPTIONAL { ?doc ex:sourceReference ?ref }
+}"""
+
+KG_CHUNKS, KG_DF, KG_TOTAL = defaultdict(list), Counter(), 0
+for r in g.query(DOC_Q):
+    uri = str(r.doc)
+    title = str(r.label) if r.label else NODE_LABEL.get(uri, uri)
+    reference = str(r.ref) if r.ref else uri
+    for idx, text in enumerate(split_chunks(str(r.content))):
+        ts = tokens(text)
+        if not ts:
+            continue
+        KG_CHUNKS[uri].append({"chunk_id": idx, "content": text, "title": title,
+                               "reference": reference, "doc_uri": uri, "_tokens": ts})
+        KG_DF.update(ts)
+        KG_TOTAL += 1
+print(f"Cached: {KG_TOTAL} chunks / {len(KG_CHUNKS)} documents")
+
+
+# ------------------------- SCORING -------------------------
+def idf(t):
+    return math.log((KG_TOTAL + 1) / (KG_DF.get(t, 0) + 1)) + 1
+
+
+def coverage(important, chunk_tokens):
+    important = set(important)
+    if not important:
+        return 0.0
+    total = sum(idf(t) for t in important) or 1.0
+    return sum(idf(t) for t in important if t in chunk_tokens) / total
+
+
+def local_graph_score(chunk_tokens, e):
+    anchor = tokens(f"{e.get('source_label','')} {e.get('predicate','')} {e.get('target_label','')}")
+    return (0.70 * coverage(anchor, chunk_tokens)
+            + 0.30 * coverage(tokens(e.get("description", "")), chunk_tokens))
+
+
+def get_doc_scores(ranked_edges, seeds):
+    edges_by_doc, seed_scores = defaultdict(list), {}
+    for e in ranked_edges:
+        for side in ("source", "target"):
+            if e[side] in KG_CHUNKS:
+                edges_by_doc[e[side]].append(e)
+    for uri, _, score, _ in seeds:
+        if uri in KG_CHUNKS:
+            seed_scores[uri] = max(seed_scores.get(uri, 0), score / 100)
+
+    raw, decay = {}, [1.0, 0.5, 0.25, 0.125, 0.0625]
+    for uri in set(edges_by_doc) | set(seed_scores):
+        es = sorted(edges_by_doc.get(uri, []), key=lambda e: e.get("score", 0), reverse=True)[:TOP_EDGES_PER_DOC]
+        edges_by_doc[uri] = es
+        raw[uri] = max(sum(e.get("score", 0) * w for e, w in zip(es, decay)), seed_scores.get(uri, 0))
+
+    mx = max(raw.values(), default=1.0) or 1.0
+    return {uri: score / mx for uri, score in raw.items()}, edges_by_doc
+
+
+def score_candidates(query, doc_scores, edges_by_doc):
+    q_tokens, candidates = tokens(query), []
+    for uri in set(doc_scores):
+        doc_score, doc_edges = doc_scores[uri], edges_by_doc.get(uri, [])
+        max_edge = max((e.get("score", 0) for e in doc_edges), default=0)
+        for c in KG_CHUNKS[uri]:
+            q_score = coverage(q_tokens, c["_tokens"])
+            g_score = max((local_graph_score(c["_tokens"], e) *
+                           (e.get("score", 0) / max_edge if max_edge > 0 else 0)
+                           for e in doc_edges), default=0.0)
+            if q_score <= 0 and g_score <= 0:
+                continue
+            final = W_QUERY*q_score + W_LOCAL_GRAPH*g_score + W_DOC_GRAPH*doc_score
+            candidates.append({**c, "_score": final, "_query": q_score,
+                               "_graph": g_score, "_doc": doc_score})
+    return candidates
+
+
+# ------------------------- TOP-K MMR -------------------------
+def text_key(c):
+    return re.sub(r"\s+", " ", c["content"].lower()).strip()
+
+
+def select_top_k(candidates):
+    remaining, chosen, seen, per_doc = candidates.copy(), [], set(), defaultdict(int)
+
+    while len(chosen) < TOP_K and remaining:
+        eligible = [c for c in remaining if per_doc[c["doc_uri"]] < MAX_PER_DOC]
+        if not eligible:
+            break
+
+        def mmr(c):
+            redundancy = max((len(c["_tokens"] & s["_tokens"]) / len(c["_tokens"] | s["_tokens"])
+                              for s in chosen), default=0)
+            return MMR_LAMBDA*c["_score"] - (1-MMR_LAMBDA)*redundancy
+
+        best = max(eligible, key=mmr)
+        remaining.remove(best)
+        key = text_key(best)
+        if key in seen:
+            continue
+        seen.add(key); per_doc[best["doc_uri"]] += 1; chosen.append(best)
+
+    ranked = sorted(candidates, key=lambda c: c["_score"], reverse=True)
+    for keep_doc_limit in (True, False):
+        for c in ranked:
+            if len(chosen) >= TOP_K:
+                break
+            key = text_key(c)
+            if key in seen or (keep_doc_limit and per_doc[c["doc_uri"]] >= MAX_PER_DOC):
+                continue
+            seen.add(key)
+            if keep_doc_limit:
+                per_doc[c["doc_uri"]] += 1
+            chosen.append(c)
+        if len(chosen) >= TOP_K:
+            break
+    return chosen[:TOP_K]
+
+
+# ------------------------- MAIN RETRIEVER -------------------------
+def top10_from_kg(query, debug=False):
+    phrases = extract_query_entities(query)
+    seeds = link_entities(phrases) if phrases else []
+    if not seeds:
+        seeds = lexical_fallback(query, limit=8)
+    if not seeds:
+        print("No KG seed nodes found.")
+        return {"predictions": [{"data": []}]}
+
+    edges, _ = traverse(seeds)
+    ranked_edges = rank_edges(edges) if edges else []
+    doc_scores, edges_by_doc = get_doc_scores(ranked_edges, seeds)
+    if not doc_scores:
+        print("No KG-grounded documents found.")
+        return {"predictions": [{"data": []}]}
+
+    candidates = score_candidates(query, doc_scores, edges_by_doc)
+    if not candidates:
+        print("No relevant KG chunks found.")
+        return {"predictions": [{"data": []}]}
+    chosen = select_top_k(candidates)
+
+    if debug:
+        print(f"\nQuery: {query}")
+        print(f"Entities: {[p for p, _ in phrases]}")
+        print(f"Seeds: {len(seeds)} | Edges: {len(edges)} | KG Docs: {len(doc_scores)} | Candidates: {len(candidates)}")
+        for i, c in enumerate(chosen, 1):
+            print(f"{i}. {c['title']} | final={c['_score']:.3f} | query={c['_query']:.3f} | graph={c['_graph']:.3f} | doc={c['_doc']:.3f}")
+
+    return {"predictions": [{"data": [
+        {"content": c["content"], "title": c["title"], "reference": c["reference"]}
+        for c in chosen
+    ]}]}
+
+
+# ------------------------- RUN -------------------------
+QUERY_KG = "How can you create a new Standard Record Type in the eTest Diary Manual system?"
+response_kg = top10_from_kg(QUERY_KG, debug=False)
+
+print("\n" + "="*100 + "\nUSER QUERY\n" + "="*100)
+print(QUERY_KG)
+print("\n" + "="*100 + "\nTOP 10 KG CHUNKS\n" + "="*100)
+print(json.dumps(response_kg, indent=2, ensure_ascii=False))
+print("\nStored in: response_kg")
