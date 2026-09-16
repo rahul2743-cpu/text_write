@@ -1,0 +1,18 @@
+
+test_phrases = [
+    ("System Engineering Tool", "CONCEPT"),
+    ("TestComplete", "TOOL")
+]
+
+result = link_entities(test_phrases)
+
+print("=" * 80)
+print("FINAL RESULT")
+print("=" * 80)
+
+for node, label, score, phrase in result:
+    print(f"Node   : {node}")
+    print(f"Label  : {label}")
+    print(f"Score  : {score}")
+    print(f"Phrase : {phrase}")
+    print()
