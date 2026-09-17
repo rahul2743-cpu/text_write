@@ -1,0 +1,7 @@
+print("Total documents:", len(KG_CHUNKS))
+print("Total chunks:", KG_TOTAL)
+
+for doc_uri, chunks in KG_CHUNKS.items():
+    print("Document:", doc_uri)
+    print("Number of chunks:", len(chunks))
+    print("-" * 80)
