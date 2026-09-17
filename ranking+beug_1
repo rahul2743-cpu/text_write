@@ -2,40 +2,120 @@ def top10_from_kg(query, debug=False):
 
     phrases = extract_query_entities(query)
 
-    print("Query:", query)
-    print("Extracted phrases:", phrases)
+    print("\n" + "=" * 80)
+    print("QUERY")
+    print("=" * 80)
+    print(query)
+
+    print("\n" + "=" * 80)
+    print("EXTRACTED PHRASES")
+    print("=" * 80)
+    print(phrases)
 
     seeds = link_entities(phrases) if phrases else []
 
-    print("Seeds:", seeds)
+    print("\n" + "=" * 80)
+    print("SEEDS")
+    print("=" * 80)
+
+    for i, seed in enumerate(seeds, start=1):
+        print(f"\nSeed {i}")
+        print("-" * 40)
+        print(seed)
 
     if not seeds:
         seeds = lexical_fallback(query, limit=8)
-        print("Fallback seeds:", seeds)
+
+        print("\n" + "=" * 80)
+        print("FALLBACK SEEDS")
+        print("=" * 80)
+
+        for i, seed in enumerate(seeds, start=1):
+            print(f"\nFallback seed {i}")
+            print("-" * 40)
+            print(seed)
 
     if not seeds:
-        print("No KG seed nodes found.")
+        print("\nNo KG seed nodes found.")
         return {"predictions": [{"data": []}]}
 
     edges, _ = traverse(seeds)
 
-    print("Traversed edges:", edges)
+    print("\n" + "=" * 80)
+    print("TRAVERSED EDGES")
+    print("=" * 80)
+
+    for i, edge in enumerate(edges, start=1):
+        print(f"\nEdge {i}")
+        print("-" * 40)
+        print("Source:", edge.get("source_label"))
+        print("Predicate:", edge.get("predicate"))
+        print("Target:", edge.get("target_label"))
+        print("Description:", edge.get("description"))
+        print("Hop:", edge.get("hop"))
+        print("Seed score:", edge.get("seed_score"))
+        print("Strength:", edge.get("strength"))
 
     ranked_edges = rank_edges(edges) if edges else []
 
-    print("Ranked edges:", ranked_edges)
+    print("\n" + "=" * 80)
+    print("RANKED EDGES")
+    print("=" * 80)
+
+    for i, edge in enumerate(ranked_edges, start=1):
+        print(f"\nRank {i}")
+        print("-" * 40)
+        print("Source:", edge.get("source_label"))
+        print("Predicate:", edge.get("predicate"))
+        print("Target:", edge.get("target_label"))
+        print("Score:", edge.get("score"))
+        print("Hop:", edge.get("hop"))
+        print("Description:", edge.get("description"))
 
     doc_scores, edges_by_doc = get_doc_scores(
         ranked_edges,
         seeds
     )
 
-    print("Document scores:", doc_scores)
-    print("Edges by document:", edges_by_doc)
+    print("\n" + "=" * 80)
+    print("DOCUMENT SCORES")
+    print("=" * 80)
+
+    for i, (doc_uri, score) in enumerate(
+        sorted(
+            doc_scores.items(),
+            key=lambda item: item[1],
+            reverse=True
+        ),
+        start=1
+    ):
+        print(f"\nDocument Rank {i}")
+        print("-" * 40)
+        print("Document URI:", doc_uri)
+        print("Score:", score)
+
+    print("\n" + "=" * 80)
+    print("EDGES BY DOCUMENT")
+    print("=" * 80)
+
+    for doc_uri, doc_edges in edges_by_doc.items():
+        print("\nDocument:", doc_uri)
+
+        for i, edge in enumerate(doc_edges, start=1):
+            print(f"\n  Edge {i}")
+            print("  Source:", edge.get("source_label"))
+            print("  Predicate:", edge.get("predicate"))
+            print("  Target:", edge.get("target_label"))
+            print("  Score:", edge.get("score"))
 
     grounded_docs = set(doc_scores)
 
-    print("Grounded documents:", grounded_docs)
+    print("\n" + "=" * 80)
+    print("GROUNDED DOCUMENTS")
+    print("=" * 80)
+
+    for i, doc in enumerate(grounded_docs, start=1):
+        print(f"{i}. {doc}")
 
     if not grounded_docs:
         print("No KG-grounded documents found.")
@@ -43,4 +123,9 @@ def top10_from_kg(query, debug=False):
 
     query_tokens = tokens(query)
 
-    print("Query tokens:", query_tokens)
+    print("\n" + "=" * 80)
+    print("QUERY TOKENS")
+    print("=" * 80)
+    print(query_tokens)
+
+    # Continue with your remaining chunk-scoring and top-10 logic here.
