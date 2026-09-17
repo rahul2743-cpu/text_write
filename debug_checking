@@ -5,3 +5,44 @@ for doc_uri, chunks in KG_CHUNKS.items():
     print("Document:", doc_uri)
     print("Number of chunks:", len(chunks))
     print("-" * 80)
+
+
+for doc_uri, chunks in KG_CHUNKS.items():
+    print("=" * 100)
+    print("DOCUMENT:", doc_uri)
+    print("NUMBER OF CHUNKS:", len(chunks))
+
+    for chunk in chunks:
+        print("\nCHUNK ID:", chunk["chunk_id"])
+        print("CHUNK LENGTH:", len(chunk["content"]))
+        print("CHUNK CONTENT:")
+        print(chunk["content"])
+
+
+
+doc_uri, chunks = next(iter(KG_CHUNKS.items()))
+
+print("DOCUMENT:", doc_uri)
+print("NUMBER OF CHUNKS:", len(chunks))
+
+for chunk in chunks:
+    print("\nCHUNK ID:", chunk["chunk_id"])
+    print("CHUNK LENGTH:", len(chunk["content"]))
+
+for idx, text in enumerate(split_chunks(str(r.content))):
+
+
+
+print("TOTAL DOCUMENTS:", len(KG_CHUNKS))
+
+for doc_no, (doc_uri, chunks) in enumerate(KG_CHUNKS.items(), start=1):
+    print("=" * 100)
+    print(f"DOCUMENT {doc_no}")
+    print("DOCUMENT URI:", doc_uri)
+    print("NUMBER OF CHUNKS:", len(chunks))
+
+    for chunk in chunks:
+        print("\nCHUNK ID:", chunk["chunk_id"])
+        print("CHUNK LENGTH:", len(chunk["content"]))
+        print("CHUNK CONTENT:")
+        print(chunk["content"])
