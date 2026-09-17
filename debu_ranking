@@ -1,0 +1,65 @@
+# ==========================================================
+# DEBUG: CHECK ONE EXTRACTED ENTITY
+# ==========================================================
+
+DEBUG_ENTITY = "Aircraft Engine"
+
+print("\n" + "=" * 80)
+print("DEBUG ENTITY:", DEBUG_ENTITY)
+print("=" * 80)
+
+print("\n1. EXTRACTED PHRASES")
+print(phrases)
+
+print("\n2. SEEDS GENERATED FROM THE ENTITY")
+
+for seed in seeds:
+    print(seed)
+
+print("\n3. RANKED EDGES CONNECTED TO THE ENTITY")
+
+for index, edge in enumerate(ranked_edges, start=1):
+
+    source_label = edge.get("source_label", "")
+    target_label = edge.get("target_label", "")
+    predicate = edge.get("predicate", "")
+
+    relationship_text = (
+        f"{source_label} "
+        f"{predicate} "
+        f"{target_label}"
+    )
+
+    if DEBUG_ENTITY.lower() in relationship_text.lower():
+
+        print(f"\nEdge {index}:")
+        print(edge)
+
+print("\n4. DOCUMENT SCORES")
+
+for uri, score in sorted(
+    doc_scores.items(),
+    key=lambda item: item[1],
+    reverse=True
+):
+
+    print(f"{uri} => {score:.4f}")
+
+print("\n5. EDGES GROUPED BY DOCUMENT")
+
+for uri, edges in edges_by_doc.items():
+
+    print("\nDocument:", uri)
+
+    for edge in edges:
+
+        print(
+            "Source:",
+            edge.get("source_label", edge.get("source")),
+            "| Predicate:",
+            edge.get("predicate"),
+            "| Target:",
+            edge.get("target_label", edge.get("target")),
+            "| Score:",
+            edge.get("score")
+        )
