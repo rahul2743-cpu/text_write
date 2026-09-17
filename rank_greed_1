@@ -1,102 +1,210 @@
-# --- GET WEIGHTS ---
+# ==========================================================
+# DEBUG: QUERY SCORE + GRAPH SCORE + DOC SCORE + FINAL SCORE
+# ==========================================================
+
+QUERY_KG = (
+    "What is meant by service operation "
+    "in the context of Rolls-Royce product?"
+)
+
+print("=" * 100)
+print("QUERY")
+print("=" * 100)
+print(QUERY_KG)
+
+
+# ----------------------------------------------------------
+# 1. Query tokens
+# ----------------------------------------------------------
+
+query_tokens = tokens(QUERY_KG)
+
+print("\n" + "=" * 100)
+print("1. QUERY TOKENS")
+print("=" * 100)
+print(query_tokens)
+
+
+# ----------------------------------------------------------
+# 2. Calculate weights
+# ----------------------------------------------------------
+
 W_QUERY, W_LOCAL_GRAPH, W_DOC_GRAPH = get_weights(
-    query,
+    QUERY_KG,
     seeds,
     query_tokens
 )
 
-print("\nWEIGHTS")
-print("W_QUERY       =", W_QUERY)
-print("W_LOCAL_GRAPH =", W_LOCAL_GRAPH)
-print("W_DOC_GRAPH   =", W_DOC_GRAPH)
+print("\n" + "=" * 100)
+print("WEIGHTS")
+print("=" * 100)
+print(f"W_QUERY       = {W_QUERY}")
+print(f"W_LOCAL_GRAPH = {W_LOCAL_GRAPH}")
+print(f"W_DOC_GRAPH   = {W_DOC_GRAPH}")
 
-candidates = []
+
+# ----------------------------------------------------------
+# 3. Calculate scores for each document and chunk
+# ----------------------------------------------------------
+
+all_candidates = []
+
+print("\n" + "=" * 100)
+print("DOCUMENT AND CHUNK SCORING")
+print("=" * 100)
 
 for uri in grounded_docs:
 
-    print("\n" + "=" * 80)
-    print("DOCUMENT:", uri)
-    print("=" * 80)
+    # Score of the complete document
+    doc_score = doc_scores.get(uri, 0.0)
 
-    doc_score = doc_scores.get(uri, 0)
+    # Graph edges connected to this document
     doc_edges = edges_by_doc.get(uri, [])
 
-    print("doc_score:", doc_score)
-    print("number of edges:", len(doc_edges))
-
+    # Highest edge score for normalization
     max_edge = max(
-        (e.get("score", 0) for e in doc_edges),
-        default=0
+        (e.get("score", 0.0) for e in doc_edges),
+        default=0.0
     )
 
-    print("max_edge:", max_edge)
+    print("\n" + "-" * 100)
+    print("DOCUMENT")
+    print("-" * 100)
+    print(f"Document URI : {uri}")
+    print(f"Document score: {doc_score}")
+    print(f"Number of graph edges: {len(doc_edges)}")
+    print(f"Maximum edge score: {max_edge}")
+
+    # ------------------------------------------------------
+    # 4. Score every chunk inside this document
+    # ------------------------------------------------------
 
     for chunk_number, c in enumerate(
         KG_CHUNKS.get(uri, []),
         start=1
     ):
 
-        print("\n" + "-" * 80)
-        print("CHUNK:", chunk_number)
-        print("Chunk ID:", c.get("chunk_id"))
+        print("\n" + "." * 100)
+        print(f"CHUNK {chunk_number}")
+        print("." * 100)
+
+        print("Chunk ID:")
+        print(c.get("chunk_id"))
+
+        print("\nChunk content:")
+        print(c.get("content", "")[:500])
+
+        # --------------------------------------------------
+        # A. QUERY SCORE
+        # --------------------------------------------------
 
         query_score = coverage(
             query_tokens,
             c["_tokens"]
         )
 
-        print("query_score:", query_score)
+        print("\n[QUERY SCORE]")
+        print(f"Query tokens : {query_tokens}")
+        print(f"Chunk tokens : {c['_tokens']}")
+        print(f"Query score  : {query_score}")
+
+        # --------------------------------------------------
+        # B. GRAPH SCORE
+        # --------------------------------------------------
 
         graph_score = 0.0
 
+        print("\n[GRAPH SCORE]")
+
+        if not doc_edges:
+            print("No graph edges found for this document.")
+
         for edge_number, e in enumerate(doc_edges, start=1):
 
-            importance = (
-                e.get("score", 0) / max_edge
-                if max_edge > 0
-                else 0
-            )
+            edge_score = e.get("score", 0.0)
+
+            if max_edge > 0:
+                importance = edge_score / max_edge
+            else:
+                importance = 0.0
 
             local_score = local_graph_score(
                 c["_tokens"],
                 e
             )
 
-            score = local_score * importance
-
-            print("\nEdge:", edge_number)
-            print("edge score:", e.get("score", 0))
-            print("importance:", importance)
-            print("local graph score:", local_score)
-            print("edge contribution:", score)
+            edge_contribution = (
+                local_score * importance
+            )
 
             graph_score = max(
                 graph_score,
-                score
+                edge_contribution
             )
 
-        print("\nFinal graph score:", graph_score)
+            print(f"\nEdge {edge_number}")
+            print(f"Source              : {e.get('source')}")
+            print(f"Predicate           : {e.get('predicate')}")
+            print(f"Target              : {e.get('target')}")
+            print(f"Edge score          : {edge_score}")
+            print(f"Edge importance     : {importance}")
+            print(f"Local graph score   : {local_score}")
+            print(f"Edge contribution   : {edge_contribution}")
 
-        if query_score <= 0 and graph_score <= 0:
-            print("Chunk skipped")
-            continue
+        print(f"\nFinal graph score for this chunk: {graph_score}")
+
+        # --------------------------------------------------
+        # C. DOCUMENT SCORE
+        # --------------------------------------------------
+
+        print("\n[DOCUMENT SCORE]")
+        print(f"Document score: {doc_score}")
+
+        # --------------------------------------------------
+        # D. FINAL SCORE
+        # --------------------------------------------------
+
+        query_contribution = W_QUERY * query_score
+        graph_contribution = W_LOCAL_GRAPH * graph_score
+        doc_contribution = W_DOC_GRAPH * doc_score
 
         final_score = (
-            W_QUERY * query_score
-            + W_LOCAL_GRAPH * graph_score
-            + W_DOC_GRAPH * doc_score
+            query_contribution
+            + graph_contribution
+            + doc_contribution
         )
 
-        print("\nCALCULATION")
+        print("\n[FINAL SCORE CALCULATION]")
+
         print(
-            f"{W_QUERY} * {query_score} "
-            f"+ {W_LOCAL_GRAPH} * {graph_score} "
-            f"+ {W_DOC_GRAPH} * {doc_score}"
+            f"Query contribution = "
+            f"{W_QUERY} × {query_score} "
+            f"= {query_contribution}"
         )
 
-        print("FINAL SCORE:", final_score)
+        print(
+            f"Graph contribution = "
+            f"{W_LOCAL_GRAPH} × {graph_score} "
+            f"= {graph_contribution}"
+        )
 
-        candidates.append({
+        print(
+            f"Document contribution = "
+            f"{W_DOC_GRAPH} × {doc_score} "
+            f"= {doc_contribution}"
+        )
+
+        print(
+            f"\nFinal score = "
+            f"{query_contribution} + "
+            f"{graph_contribution} + "
+            f"{doc_contribution}"
+        )
+
+        print(f"FINAL SCORE = {final_score}")
+
+        # Store the result
+        all_candidates.append({
             **c,
             "_score": final_score,
             "_query": query_score,
@@ -104,14 +212,27 @@ for uri in grounded_docs:
             "_doc": doc_score
         })
 
-print("\n" + "=" * 80)
-print("TOTAL CANDIDATES:", len(candidates))
-print("=" * 80)
 
-for i, c in enumerate(candidates, start=1):
-    print("\nCandidate", i)
-    print("Chunk ID:", c.get("chunk_id"))
-    print("Final score:", c.get("_score"))
-    print("Query score:", c.get("_query"))
-    print("Graph score:", c.get("_graph"))
-    print("Document score:", c.get("_doc"))
+# ----------------------------------------------------------
+# 5. Sort all chunks by final score
+# ----------------------------------------------------------
+
+all_candidates.sort(
+    key=lambda x: x["_score"],
+    reverse=True
+)
+
+print("\n" + "=" * 100)
+print("FINAL CHUNK RANKING")
+print("=" * 100)
+
+for rank, c in enumerate(all_candidates, start=1):
+
+    print(
+        f"{rank}. "
+        f"Chunk ID: {c.get('chunk_id')} | "
+        f"Query score: {c['_query']:.4f} | "
+        f"Graph score: {c['_graph']:.4f} | "
+        f"Doc score: {c['_doc']:.4f} | "
+        f"Final score: {c['_score']:.4f}"
+    )
