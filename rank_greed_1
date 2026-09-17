@@ -162,3 +162,32 @@ doc_scores, edges_by_doc = get_doc_scores(
 grounded_docs = set(doc_scores.keys())
 
 query_tokens = tokens(query)
+
+
+
+
+# ==========================================================
+# RUN THE RETRIEVER
+# ==========================================================
+
+QUERY_KG = (
+    "What is meant by service operation "
+    "in the context of Rolls-Royce product?"
+)
+
+# Call the function
+response_kg = top10_from_kg(
+    QUERY_KG,
+    debug=True
+)
+
+# Print the complete output
+print("\n" + "=" * 100)
+print("FINAL OUTPUT")
+print("=" * 100)
+
+print(json.dumps(
+    response_kg,
+    indent=2,
+    ensure_ascii=False
+))
