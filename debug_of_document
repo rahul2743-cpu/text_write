@@ -1,0 +1,61 @@
+def pick_documents_debug(ranked_edges):
+    doc_score = defaultdict(float)
+
+    print("\n" + "=" * 80)
+    print("DOCUMENT SELECTION DEBUG")
+    print("=" * 80)
+
+    for edge_number, e in enumerate(ranked_edges, start=1):
+
+        print(f"\nEDGE {edge_number}")
+        print(
+            f"{e['source']} --> {e['target']} "
+            f"| edge score = {e['score']:.4f}"
+        )
+
+        for side in ("source", "target"):
+
+            node = e[side]
+
+            if node in CONTENT_NODES:
+                old_score = doc_score[node]
+
+                doc_score[node] += e["score"]
+
+                print(f"  {node} is a content document")
+                print(f"  Previous score: {old_score:.4f}")
+                print(f"  Added score:    {e['score']:.4f}")
+                print(f"  New score:      {doc_score[node]:.4f}")
+
+            else:
+                print(f"  {node} is not a content document - ignored")
+
+    sorted_docs = sorted(
+        doc_score.items(),
+        key=lambda kv: kv[1],
+        reverse=True
+    )
+
+    print("\n" + "-" * 80)
+    print("DOCUMENT SCORES BEFORE LIMIT")
+    print("-" * 80)
+
+    for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
+        print(f"{rank}. {doc_id} --> {score:.4f}")
+
+    selected_docs = [
+        doc_id
+        for doc_id, _score in sorted_docs[:MAX_DOCS]
+    ]
+
+    print("\n" + "-" * 80)
+    print(f"TOP {MAX_DOCS} SELECTED DOCUMENTS")
+    print("-" * 80)
+
+    for rank, doc_id in enumerate(selected_docs, start=1):
+        print(f"{rank}. {doc_id}")
+
+    return selected_docs
+
+
+      selected_documents = pick_documents_debug(ranked_edges)
