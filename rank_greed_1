@@ -1,121 +1,155 @@
-# ==========================================================
-# KG CHUNK SCORING
-# ==========================================================
-
-# Convert the user query into tokens
-query_tokens = tokens(query)
-
-# Get scoring weights
+# --- GET WEIGHTS ---
 W_QUERY, W_LOCAL_GRAPH, W_DOC_GRAPH = get_weights(
-    query=query,
-    seeds=seeds,
-    query_tokens=query_tokens
+    query,
+    seeds,
+    query_tokens
 )
 
-# Store all relevant chunk candidates
+print("\n" + "=" * 100)
+print("WEIGHTS")
+print("=" * 100)
+
+print("W_QUERY       :", W_QUERY)
+print("W_LOCAL_GRAPH :", W_LOCAL_GRAPH)
+print("W_DOC_GRAPH   :", W_DOC_GRAPH)
+
 candidates = []
 
-# Iterate through documents selected by graph retrieval
+print("\n" + "=" * 100)
+print("GROUNDED DOCUMENTS")
+print("=" * 100)
+
+print("Number of grounded documents:", len(grounded_docs))
+print("Grounded documents:", grounded_docs)
+
+
 for uri in grounded_docs:
 
-    # Document-level graph score
-    doc_score = doc_scores.get(uri, 0.0)
+    print("\n" + "-" * 100)
+    print("PROCESSING DOCUMENT")
+    print("-" * 100)
+    print("Document URI:", uri)
 
-    # Get graph edges related to this document
+    doc_score = doc_scores.get(uri, 0)
     doc_edges = edges_by_doc.get(uri, [])
 
-    # Find the highest edge score for this document
+    print("Document score:", doc_score)
+    print("Number of document edges:", len(doc_edges))
+
     max_edge = max(
-        (e.get("score", 0.0) for e in doc_edges),
-        default=0.0
+        (e.get("score", 0) for e in doc_edges),
+        default=0
     )
 
-    # Iterate through all prepared chunks of the document
-    for c in KG_CHUNKS.get(uri, []):
+    print("Maximum edge score:", max_edge)
 
-        # --------------------------------------------------
-        # 1. Query-level relevance
-        # --------------------------------------------------
+    chunks = KG_CHUNKS.get(uri, [])
 
+    print("Number of chunks in this document:", len(chunks))
+
+    for chunk_number, c in enumerate(chunks, start=1):
+
+        print("\n" + "." * 80)
+        print("PROCESSING CHUNK", chunk_number)
+        print("." * 80)
+
+        print("Chunk ID:", c.get("chunk_id"))
+        print("Chunk title:", c.get("title"))
+        print("Chunk content:", c.get("content", "")[:300])
+
+        # Query relevance score
         query_score = coverage(
             query_tokens,
             c["_tokens"]
         )
 
-        # --------------------------------------------------
-        # 2. Local graph relevance
-        # --------------------------------------------------
+        print("Query score:", query_score)
 
+        # Graph relevance score
         graph_score = 0.0
 
-        # Check every graph edge connected to this document
-        for e in doc_edges:
+        for edge_number, e in enumerate(doc_edges, start=1):
 
-            edge_score = e.get("score", 0.0)
+            importance = (
+                e.get("score", 0) / max_edge
+                if max_edge > 0
+                else 0
+            )
 
-            # Normalize the edge score
-            if max_edge > 0:
-                importance = edge_score / max_edge
-            else:
-                importance = 0.0
-
-            # Calculate how strongly this chunk matches the edge
             local_score = local_graph_score(
                 c["_tokens"],
                 e
             )
 
-            # Combine local graph score with edge importance
-            weighted_graph_score = local_score * importance
+            score = local_score * importance
 
-            # Keep the highest graph score for this chunk
+            print(f"\nEdge {edge_number}")
+            print("Source:", e.get("source"))
+            print("Target:", e.get("target"))
+            print("Predicate:", e.get("predicate"))
+            print("Edge score:", e.get("score"))
+            print("Edge importance:", importance)
+            print("Local graph score:", local_score)
+            print("Final edge contribution:", score)
+
             graph_score = max(
                 graph_score,
-                weighted_graph_score
+                score
             )
 
-        # --------------------------------------------------
-        # 3. Remove completely irrelevant chunks
-        # --------------------------------------------------
+        print("\nFinal graph score:", graph_score)
 
+        # Ignore irrelevant chunks
         if query_score <= 0 and graph_score <= 0:
+            print("RESULT: Chunk skipped because both scores are zero.")
             continue
 
-        # --------------------------------------------------
-        # 4. Calculate final chunk score
-        # --------------------------------------------------
-
+        # Final weighted score
         final_score = (
             W_QUERY * query_score
             + W_LOCAL_GRAPH * graph_score
             + W_DOC_GRAPH * doc_score
         )
 
-        # --------------------------------------------------
-        # 5. Store the chunk and all score components
-        # --------------------------------------------------
+        print("\nFINAL SCORE CALCULATION")
+        print(
+            f"{W_QUERY} * {query_score} + "
+            f"{W_LOCAL_GRAPH} * {graph_score} + "
+            f"{W_DOC_GRAPH} * {doc_score}"
+        )
+
+        print("Final chunk score:", final_score)
 
         candidates.append({
             **c,
-
-            # Final combined score
             "_score": final_score,
-
-            # Individual scores for debugging
             "_query": query_score,
             "_graph": graph_score,
             "_doc": doc_score
         })
 
+        print("RESULT: Chunk added to candidates.")
 
-# ==========================================================
-# HANDLE EMPTY RESULTS
-# ==========================================================
+print("\n" + "=" * 100)
+print("CANDIDATE SUMMARY")
+print("=" * 100)
+
+print("Total candidate chunks:", len(candidates))
+
+for index, candidate in enumerate(candidates, start=1):
+
+    print("\nCandidate", index)
+    print("Chunk ID:", candidate.get("chunk_id"))
+    print("Document:", candidate.get("doc_uri"))
+    print("Final score:", candidate.get("_score"))
+    print("Query score:", candidate.get("_query"))
+    print("Graph score:", candidate.get("_graph"))
+    print("Document score:", candidate.get("_doc"))
 
 if not candidates:
-    print("No relevant KG chunks found.")
+    print("\nNo relevant KG chunks found.")
 
-    return {
+    result = {
         "predictions": [
             {
                 "data": []
@@ -123,71 +157,21 @@ if not candidates:
         ]
     }
 
+else:
+    result = {
+        "predictions": [
+            {
+                "data": candidates
+            }
+        ]
+    }
 
-# ==========================================================
-# SORT CANDIDATES BY FINAL SCORE
-# ==========================================================
-
-candidates = sorted(
-    candidates,
-    key=lambda x: x["_score"],
-    reverse=True
-)
-
-print(f"Total relevant candidates: {len(candidates)}")
-
-# Display the top candidates for debugging
-for i, c in enumerate(candidates[:10], start=1):
-
-    print(f"\nCandidate {i}")
-    print(f"Document : {c.get('doc_id', 'N/A')}")
-    print(f"Chunk    : {c.get('chunk_id', 'N/A')}")
-    print(f"Final    : {c['_score']:.4f}")
-    print(f"Query    : {c['_query']:.4f}")
-    print(f"Graph    : {c['_graph']:.4f}")
-    print(f"Doc      : {c['_doc']:.4f}")
-    print(f"Text     : {c.get('text', '')[:300]}")
-
-
-
-
-edges, _ = traverse(seeds)
-ranked_edges = rank_edges(edges) if edges else []
-
-doc_scores, edges_by_doc = get_doc_scores(
-    ranked_edges,
-    seeds
-)
-
-grounded_docs = set(doc_scores.keys())
-
-query_tokens = tokens(query)
-
-
-
-
-# ==========================================================
-# RUN THE RETRIEVER
-# ==========================================================
-
-QUERY_KG = (
-    "What is meant by service operation "
-    "in the context of Rolls-Royce product?"
-)
-
-# Call the function
-response_kg = top10_from_kg(
-    QUERY_KG,
-    debug=True
-)
-
-# Print the complete output
 print("\n" + "=" * 100)
-print("FINAL OUTPUT")
+print("FINAL OUTPUT OF THIS CODE BLOCK")
 print("=" * 100)
 
 print(json.dumps(
-    response_kg,
+    result,
     indent=2,
     ensure_ascii=False
 ))
