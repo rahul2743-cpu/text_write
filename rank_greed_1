@@ -147,3 +147,18 @@ for i, c in enumerate(candidates[:10], start=1):
     print(f"Graph    : {c['_graph']:.4f}")
     print(f"Doc      : {c['_doc']:.4f}")
     print(f"Text     : {c.get('text', '')[:300]}")
+
+
+
+
+edges, _ = traverse(seeds)
+ranked_edges = rank_edges(edges) if edges else []
+
+doc_scores, edges_by_doc = get_doc_scores(
+    ranked_edges,
+    seeds
+)
+
+grounded_docs = set(doc_scores.keys())
+
+query_tokens = tokens(query)
