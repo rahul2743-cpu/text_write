@@ -83,3 +83,10 @@ def rank_edges_debug(edges):
         key=lambda x: x["score"],
         reverse=True
     )
+
+
+QUESTION = "What is meant by service operation in the context of Rolls-Royce product?"
+
+r = kg_retrieve(QUESTION, verbose=True)
+
+ranked_edges = rank_edges_debug(r["edges"])
