@@ -1,23 +1,194 @@
 print("=" * 100)
-print("1. DEBUG idf()")
+print("2. DEBUG coverage()")
 print("=" * 100)
 
-test_tokens = [
-    "service",
-    "operation",
-    "rolls",
-    "royce",
-    "product",
-    "engine"
-]
+important_tokens = tokens(
+    "service operation Rolls Royce product"
+)
 
-for token in test_tokens:
+chunk_tokens = tokens(
+    "The Rolls Royce product contains information about service operation."
+)
 
-    document_frequency = KG_DF.get(token, 0)
-    token_idf = idf(token)
+print("Important tokens:")
+print(important_tokens)
+
+print("\nChunk tokens:")
+print(chunk_tokens)
+
+print("\nIndividual token IDF values:")
+
+for token in sorted(important_tokens):
 
     print(
-        f"Token: {token}\n"
-        f"Document frequency: {document_frequency}\n"
-        f"IDF score: {token_idf:.6f}\n"
+        f"{token}: "
+        f"IDF = {idf(token):.6f} | "
+        f"Present in chunk = {token in chunk_tokens}"
     )
+
+coverage_score = coverage(
+    important_tokens,
+    chunk_tokens
+)
+
+print("\nFinal coverage score:", coverage_score)
+print("Final coverage percentage:", coverage_score * 100, "%")
+
+
+
+
+
+print("=" * 100)
+print("3. DEBUG local_graph_score()")
+print("=" * 100)
+
+if ranked_edges:
+
+    edge = ranked_edges[0]
+
+    chunk_tokens = tokens(
+        "Service operation is related to Rolls Royce product "
+        "and engine development programme."
+    )
+
+    anchor = tokens(
+        f"{edge.get('source_label', '')} "
+        f"{edge.get('predicate', '')} "
+        f"{edge.get('target_label', '')}"
+    )
+
+    description = tokens(
+        edge.get("description", "")
+    )
+
+    anchor_coverage = coverage(
+        anchor,
+        chunk_tokens
+    )
+
+    description_coverage = coverage(
+        description,
+        chunk_tokens
+    )
+
+    local_score = local_graph_score(
+        chunk_tokens,
+        edge
+    )
+
+    print("\nEDGE INFORMATION")
+    print("Source:", edge.get("source_label", edge.get("source")))
+    print("Predicate:", edge.get("predicate"))
+    print("Target:", edge.get("target_label", edge.get("target")))
+    print("Existing edge score:", edge.get("score", 0))
+
+    print("\nANCHOR TOKENS")
+    print(anchor)
+
+    print("\nDESCRIPTION TOKENS")
+    print(description)
+
+    print("\nCHUNK TOKENS")
+    print(chunk_tokens)
+
+    print("\nANCHOR COVERAGE:", anchor_coverage)
+    print("DESCRIPTION COVERAGE:", description_coverage)
+
+    print("\nLOCAL GRAPH SCORE CALCULATION")
+    print(
+        f"0.70 × {anchor_coverage:.6f} = "
+        f"{0.70 * anchor_coverage:.6f}"
+    )
+
+    print(
+        f"0.30 × {description_coverage:.6f} = "
+        f"{0.30 * description_coverage:.6f}"
+    )
+
+    print(
+        "\nFinal local graph score:",
+        f"{local_score:.6f}"
+    )
+
+else:
+    print("ranked_edges is empty.")
+
+
+
+
+print("=" * 100)
+print("4. DEBUG get_doc_scores()")
+print("=" * 100)
+
+doc_scores, edges_by_doc = get_doc_scores(
+    ranked_edges,
+    seeds
+)
+
+print("\nFINAL NORMALIZED DOCUMENT SCORES")
+
+for rank, (uri, score) in enumerate(
+    sorted(
+        doc_scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    ),
+    start=1
+):
+
+    print(
+        f"{rank}. {uri} -> "
+        f"{score:.6f}"
+    )
+
+
+
+
+
+weights = [1.0, 0.5, 0.25, 0.125, 0.0625]
+
+print("\nDETAILED DOCUMENT SCORE CALCULATION")
+
+for uri, edges in edges_by_doc.items():
+
+    print("\n" + "-" * 80)
+    print("DOCUMENT:", uri)
+    print("-" * 80)
+
+    graph_score = 0.0
+
+    for rank, (edge, weight) in enumerate(
+        zip(edges, weights),
+        start=1
+    ):
+
+        edge_score = edge.get("score", 0)
+        contribution = edge_score * weight
+
+        graph_score += contribution
+
+        print(
+            f"Edge {rank}: "
+            f"edge score={edge_score:.6f}, "
+            f"weight={weight}, "
+            f"contribution={contribution:.6f}"
+        )
+
+    seed_score = 0.0
+
+    for seed_uri, label, score, extra in seeds:
+
+        if seed_uri == uri:
+            seed_score = max(
+                seed_score,
+                score / 100
+            )
+
+    raw_score = max(
+        graph_score,
+        seed_score
+    )
+
+    print("\nGraph score:", graph_score)
+    print("Seed score:", seed_score)
+    print("Raw score:", raw_score)
