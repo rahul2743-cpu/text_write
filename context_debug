@@ -1,0 +1,12 @@
+# Step 1: Rank the edges
+ranked_edges = rank_edges(edges)
+
+# Step 2: Reorder the ranked edges using BFS
+ordered_edges = order_bfs(ranked_edges, seeds)
+
+# Step 3: Build the context
+context, used = build_context(ordered_edges, docs)
+
+# Step 4: Print the output
+print(context)
+print("\nCharacters used:", used)
