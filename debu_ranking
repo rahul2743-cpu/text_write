@@ -1,89 +1,23 @@
-query = "what is meant service operation in the Rolls Royce product"
-
-# Run retrieval only.
-# This does not call the LLM.
-result = kg_retrieve(
-    query,
-    verbose=True
-)
-
-print("\n" + "=" * 100)
-print("DEBUG ENTITY / QUERY")
+print("=" * 100)
+print("1. DEBUG idf()")
 print("=" * 100)
 
-print("Query:", result["question"])
+test_tokens = [
+    "service",
+    "operation",
+    "rolls",
+    "royce",
+    "product",
+    "engine"
+]
 
-print("\n" + "=" * 100)
-print("1. EXTRACTED PHRASES")
-print("=" * 100)
+for token in test_tokens:
 
-for phrase in result["phrases"]:
-    print(phrase)
-
-print("\n" + "=" * 100)
-print("2. SEEDS")
-print("=" * 100)
-
-for index, seed in enumerate(result["seeds"], start=1):
-    print(f"\nSeed {index}:")
-    print(seed)
-
-print("\n" + "=" * 100)
-print("3. RANKED / PRESENTED EDGES")
-print("=" * 100)
-
-print("Total edges:", len(result["edges"]))
-
-for index, edge in enumerate(result["edges"], start=1):
-
-    print(f"\nEdge {index}:")
-    print("Source:", edge.get("source_label", edge.get("source")))
-    print("Predicate:", edge.get("predicate"))
-    print("Target:", edge.get("target_label", edge.get("target")))
-    print("Strength:", edge.get("strength"))
-    print("Hop:", edge.get("hop"))
-    print("Seed score:", edge.get("seed_score"))
-    print("Final edge score:", edge.get("score"))
-
-print("\n" + "=" * 100)
-print("4. DOCUMENT SCORES")
-print("=" * 100)
-
-doc_scores, edges_by_doc = get_doc_scores(
-    result["edges"],
-    result["seeds"]
-)
-
-for index, item in enumerate(
-    sorted(
-        doc_scores.items(),
-        key=lambda x: x[1],
-        reverse=True
-    ),
-    start=1
-):
-
-    uri, score = item
+    document_frequency = KG_DF.get(token, 0)
+    token_idf = idf(token)
 
     print(
-        f"{index}. {uri} -> normalized score: {score:.4f}"
+        f"Token: {token}\n"
+        f"Document frequency: {document_frequency}\n"
+        f"IDF score: {token_idf:.6f}\n"
     )
-
-print("\n" + "=" * 100)
-print("5. EDGES GROUPED BY DOCUMENT")
-print("=" * 100)
-
-for uri, edges in edges_by_doc.items():
-
-    print("\nDocument:", uri)
-    print("Number of edges:", len(edges))
-
-    for index, edge in enumerate(edges, start=1):
-
-        print(
-            f"  Edge {index}: "
-            f"{edge.get('source_label', edge.get('source'))} "
-            f"--[{edge.get('predicate')}]--> "
-            f"{edge.get('target_label', edge.get('target'))} "
-            f"| score={edge.get('score', 0):.6f}"
-        )
