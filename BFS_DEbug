@@ -1,0 +1,191 @@
+from collections import defaultdict
+
+
+def order_bfs_debug(top_edges, seeds):
+    """
+    Debug version of order_bfs().
+    Shows how BFS moves from seed nodes through connected edges.
+    """
+
+    print("\n" + "=" * 90)
+    print("START BFS REORDERING")
+    print("=" * 90)
+
+    if not top_edges:
+        print("No edges available.")
+        return top_edges
+
+    # ----------------------------------------------------------
+    # 1. Print input edges
+    # ----------------------------------------------------------
+    print("\n[1] INPUT TOP EDGES")
+    for i, e in enumerate(top_edges, start=1):
+        print(
+            f"{i}. "
+            f"{e['source']} --[{e.get('predicate', 'related_to')}]--> "
+            f"{e['target']} | score={e.get('score', 'N/A')}"
+        )
+
+    # ----------------------------------------------------------
+    # 2. Build node-to-edge mapping
+    # ----------------------------------------------------------
+    by_node = defaultdict(list)
+
+    for e in top_edges:
+        by_node[e["source"]].append(e)
+        by_node[e["target"]].append(e)
+
+    print("\n[2] NODE CONNECTIONS")
+
+    for node, edges in by_node.items():
+        print(f"\nNode: {node}")
+
+        for e in edges:
+            print(
+                f"  Connected edge: "
+                f"{e['source']} --[{e.get('predicate', 'related_to')}]--> "
+                f"{e['target']}"
+            )
+
+    # ----------------------------------------------------------
+    # 3. Initialize BFS variables
+    # ----------------------------------------------------------
+    ordered = []
+    seen_ids = set()
+    queue = []
+
+    # ----------------------------------------------------------
+    # 4. Add seed nodes to the queue
+    # ----------------------------------------------------------
+    print("\n[3] SEED NODES")
+
+    for n, _label, _score, _phrase in seeds:
+        print(f"Seed found: {n}")
+
+        if n in by_node:
+            queue.append(n)
+            print(f"  Added to BFS queue: {n}")
+        else:
+            print(f"  Seed not present in selected edges: {n}")
+
+    visited_nodes = set(queue)
+
+    print(f"\nInitial queue: {queue}")
+    print(f"Visited nodes: {visited_nodes}")
+
+    # ----------------------------------------------------------
+    # 5. BFS traversal
+    # ----------------------------------------------------------
+    step = 0
+
+    print("\n[4] BFS TRAVERSAL")
+    print("-" * 90)
+
+    while queue:
+        step += 1
+
+        node = queue.pop(0)
+
+        print(f"\nBFS STEP {step}")
+        print(f"Current node: {node}")
+        print(f"Queue after removing current node: {queue}")
+
+        connected_edges = by_node.get(node, [])
+
+        if not connected_edges:
+            print("No connected edges found.")
+            continue
+
+        print(f"Connected edges for '{node}': {len(connected_edges)}")
+
+        for e in connected_edges:
+
+            eid = id(e)
+
+            print(
+                f"\nChecking edge: "
+                f"{e['source']} --[{e.get('predicate', 'related_to')}]--> "
+                f"{e['target']}"
+            )
+
+            # --------------------------------------------------
+            # 5A. Skip already processed edges
+            # --------------------------------------------------
+            if eid in seen_ids:
+                print("  Status: SKIPPED")
+                print("  Reason: Edge already processed")
+                continue
+
+            # --------------------------------------------------
+            # 5B. Add edge to BFS output
+            # --------------------------------------------------
+            seen_ids.add(eid)
+            ordered.append(e)
+
+            print("  Status: ADDED")
+            print(f"  BFS output position: {len(ordered)}")
+
+            # --------------------------------------------------
+            # 5C. Find the opposite node
+            # --------------------------------------------------
+            if e["source"] == node:
+                other = e["target"]
+            else:
+                other = e["source"]
+
+            print(f"  Current node: {node}")
+            print(f"  Moving to connected node: {other}")
+
+            # --------------------------------------------------
+            # 5D. Add the opposite node to the queue
+            # --------------------------------------------------
+            if other not in visited_nodes:
+                visited_nodes.add(other)
+                queue.append(other)
+
+                print(f"  Added '{other}' to queue")
+            else:
+                print(f"  '{other}' already visited")
+
+        print(f"\nQueue at end of BFS step {step}: {queue}")
+        print(f"Visited nodes: {visited_nodes}")
+
+    # ----------------------------------------------------------
+    # 6. Add leftover edges
+    # ----------------------------------------------------------
+    leftover = [
+        e for e in top_edges
+        if id(e) not in seen_ids
+    ]
+
+    print("\n[5] LEFTOVER EDGES")
+
+    if leftover:
+        for e in leftover:
+            print(
+                f"Not reached by BFS: "
+                f"{e['source']} --[{e.get('predicate', 'related_to')}]--> "
+                f"{e['target']}"
+            )
+    else:
+        print("No leftover edges.")
+
+    # ----------------------------------------------------------
+    # 7. Final result
+    # ----------------------------------------------------------
+    final_order = ordered + leftover
+
+    print("\n[6] FINAL BFS ORDER")
+    print("=" * 90)
+
+    for i, e in enumerate(final_order, start=1):
+        print(
+            f"{i}. "
+            f"{e['source']} --[{e.get('predicate', 'related_to')}]--> "
+            f"{e['target']} | score={e.get('score', 'N/A')}"
+        )
+
+    print("\nBFS reordering completed.")
+    print("=" * 90)
+
+    return final_order
