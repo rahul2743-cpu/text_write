@@ -1,0 +1,62 @@
+def rank_edges_debug(edges):
+    """Debug version of rank_edges()."""
+
+    for i, e in enumerate(edges, start=1):
+
+        # 1. Get source and target degree
+        source_degree = _degree(e["source"])
+        target_degree = _degree(e["target"])
+
+        # 2. Total degree
+        deg = source_degree + target_degree
+
+        # 3. Individual score components
+        seed_component = e["seed_score"] / 100.0
+
+        hop_component = HOP_DECAY ** (e["hop"] - 1)
+
+        strength_component = e["strength"] / 10.0
+
+        degree_component = 1.0 + math.log1p(deg) / 12.0
+
+        # 4. Final score
+        e["score"] = (
+            seed_component
+            * hop_component
+            * strength_component
+            * degree_component
+        )
+
+        # 5. Print the complete calculation
+        print(f"\n{'=' * 70}")
+        print(f"EDGE {i}")
+        print(f"{'=' * 70}")
+
+        print(f"Source          : {e['source_label']}")
+        print(f"Target          : {e['target_label']}")
+        print(f"Predicate       : {e['predicate']}")
+
+        print(f"\nSource degree   : {source_degree}")
+        print(f"Target degree   : {target_degree}")
+        print(f"Total degree    : {deg}")
+
+        print(f"\nSeed score      : {e['seed_score']}")
+        print(f"Hop             : {e['hop']}")
+        print(f"Strength        : {e['strength']}")
+
+        print(f"\nSeed component  : {seed_component:.4f}")
+        print(f"Hop component   : {hop_component:.4f}")
+        print(f"Strength comp.  : {strength_component:.4f}")
+        print(f"Degree component: {degree_component:.4f}")
+
+        print(f"\nFinal score     : {e['score']:.6f}")
+
+        print(
+            f"\nCalculation     : "
+            f"{seed_component:.4f} × "
+            f"{hop_component:.4f} × "
+            f"{strength_component:.4f} × "
+            f"{degree_component:.4f}"
+        )
+
+    return sorted(edges, key=lambda x: x["score"], reverse=True)
