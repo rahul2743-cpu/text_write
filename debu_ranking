@@ -192,3 +192,13 @@ for uri, edges in edges_by_doc.items():
     print("\nGraph score:", graph_score)
     print("Seed score:", seed_score)
     print("Raw score:", raw_score)
+
+
+print("Number of selected chunks:", len(chosen))
+
+for i, c in enumerate(chosen, start=1):
+    print(f"\nTop {i}")
+    print("Chunk ID:", c["chunk_id"])
+    print("Document:", c["doc_uri"])
+    print("Score:", c["_score"])
+    print("Content:", c["content"][:500])
