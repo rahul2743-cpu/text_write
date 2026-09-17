@@ -1,65 +1,89 @@
-# ==========================================================
-# DEBUG: CHECK ONE EXTRACTED ENTITY
-# ==========================================================
+query = "what is meant service operation in the Rolls Royce product"
 
-DEBUG_ENTITY = "Aircraft Engine"
+# Run retrieval only.
+# This does not call the LLM.
+result = kg_retrieve(
+    query,
+    verbose=True
+)
 
-print("\n" + "=" * 80)
-print("DEBUG ENTITY:", DEBUG_ENTITY)
-print("=" * 80)
+print("\n" + "=" * 100)
+print("DEBUG ENTITY / QUERY")
+print("=" * 100)
 
-print("\n1. EXTRACTED PHRASES")
-print(phrases)
+print("Query:", result["question"])
 
-print("\n2. SEEDS GENERATED FROM THE ENTITY")
+print("\n" + "=" * 100)
+print("1. EXTRACTED PHRASES")
+print("=" * 100)
 
-for seed in seeds:
+for phrase in result["phrases"]:
+    print(phrase)
+
+print("\n" + "=" * 100)
+print("2. SEEDS")
+print("=" * 100)
+
+for index, seed in enumerate(result["seeds"], start=1):
+    print(f"\nSeed {index}:")
     print(seed)
 
-print("\n3. RANKED EDGES CONNECTED TO THE ENTITY")
+print("\n" + "=" * 100)
+print("3. RANKED / PRESENTED EDGES")
+print("=" * 100)
 
-for index, edge in enumerate(ranked_edges, start=1):
+print("Total edges:", len(result["edges"]))
 
-    source_label = edge.get("source_label", "")
-    target_label = edge.get("target_label", "")
-    predicate = edge.get("predicate", "")
+for index, edge in enumerate(result["edges"], start=1):
 
-    relationship_text = (
-        f"{source_label} "
-        f"{predicate} "
-        f"{target_label}"
-    )
+    print(f"\nEdge {index}:")
+    print("Source:", edge.get("source_label", edge.get("source")))
+    print("Predicate:", edge.get("predicate"))
+    print("Target:", edge.get("target_label", edge.get("target")))
+    print("Strength:", edge.get("strength"))
+    print("Hop:", edge.get("hop"))
+    print("Seed score:", edge.get("seed_score"))
+    print("Final edge score:", edge.get("score"))
 
-    if DEBUG_ENTITY.lower() in relationship_text.lower():
+print("\n" + "=" * 100)
+print("4. DOCUMENT SCORES")
+print("=" * 100)
 
-        print(f"\nEdge {index}:")
-        print(edge)
+doc_scores, edges_by_doc = get_doc_scores(
+    result["edges"],
+    result["seeds"]
+)
 
-print("\n4. DOCUMENT SCORES")
-
-for uri, score in sorted(
-    doc_scores.items(),
-    key=lambda item: item[1],
-    reverse=True
+for index, item in enumerate(
+    sorted(
+        doc_scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    ),
+    start=1
 ):
 
-    print(f"{uri} => {score:.4f}")
+    uri, score = item
 
-print("\n5. EDGES GROUPED BY DOCUMENT")
+    print(
+        f"{index}. {uri} -> normalized score: {score:.4f}"
+    )
+
+print("\n" + "=" * 100)
+print("5. EDGES GROUPED BY DOCUMENT")
+print("=" * 100)
 
 for uri, edges in edges_by_doc.items():
 
     print("\nDocument:", uri)
+    print("Number of edges:", len(edges))
 
-    for edge in edges:
+    for index, edge in enumerate(edges, start=1):
 
         print(
-            "Source:",
-            edge.get("source_label", edge.get("source")),
-            "| Predicate:",
-            edge.get("predicate"),
-            "| Target:",
-            edge.get("target_label", edge.get("target")),
-            "| Score:",
-            edge.get("score")
+            f"  Edge {index}: "
+            f"{edge.get('source_label', edge.get('source'))} "
+            f"--[{edge.get('predicate')}]--> "
+            f"{edge.get('target_label', edge.get('target'))} "
+            f"| score={edge.get('score', 0):.6f}"
         )
