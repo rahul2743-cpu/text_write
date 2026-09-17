@@ -46,3 +46,20 @@ for doc_no, (doc_uri, chunks) in enumerate(KG_CHUNKS.items(), start=1):
         print("CHUNK LENGTH:", len(chunk["content"]))
         print("CHUNK CONTENT:")
         print(chunk["content"])
+
+
+
+print("Total chunks:", KG_TOTAL)
+print("Total documents:", len(KG_CHUNKS))
+print("Total unique tokens:", len(KG_DF))
+
+for uri, chunks in list(KG_CHUNKS.items())[:2]:
+    print("\nDocument URI:", uri)
+    print("Number of chunks:", len(chunks))
+
+    for c in chunks[:2]:
+        print("\nChunk ID:", c["chunk_id"])
+        print("Title:", c["title"])
+        print("Reference:", c["reference"])
+        print("Content:", c["content"][:200])
+        print("Tokens:", c["_tokens"])
