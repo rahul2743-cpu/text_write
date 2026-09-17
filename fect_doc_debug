@@ -1,0 +1,21 @@
+docs = fetch_documents(doc_nodes)
+
+print("Returned value:")
+print(docs)
+
+docs = fetch_documents(doc_nodes)
+
+print("=" * 80)
+print("FETCHED DOCUMENTS")
+print("=" * 80)
+
+if not docs:
+    print("No documents found.")
+else:
+    for i, (doc_id, label, content) in enumerate(docs, start=1):
+        print(f"\nDocument {i}")
+        print("-" * 80)
+        print("Document ID:", doc_id)
+        print("Label:", label)
+        print("Content preview:")
+        print(content[:500])
