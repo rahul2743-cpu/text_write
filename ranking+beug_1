@@ -1,0 +1,46 @@
+def top10_from_kg(query, debug=False):
+
+    phrases = extract_query_entities(query)
+
+    print("Query:", query)
+    print("Extracted phrases:", phrases)
+
+    seeds = link_entities(phrases) if phrases else []
+
+    print("Seeds:", seeds)
+
+    if not seeds:
+        seeds = lexical_fallback(query, limit=8)
+        print("Fallback seeds:", seeds)
+
+    if not seeds:
+        print("No KG seed nodes found.")
+        return {"predictions": [{"data": []}]}
+
+    edges, _ = traverse(seeds)
+
+    print("Traversed edges:", edges)
+
+    ranked_edges = rank_edges(edges) if edges else []
+
+    print("Ranked edges:", ranked_edges)
+
+    doc_scores, edges_by_doc = get_doc_scores(
+        ranked_edges,
+        seeds
+    )
+
+    print("Document scores:", doc_scores)
+    print("Edges by document:", edges_by_doc)
+
+    grounded_docs = set(doc_scores)
+
+    print("Grounded documents:", grounded_docs)
+
+    if not grounded_docs:
+        print("No KG-grounded documents found.")
+        return {"predictions": [{"data": []}]}
+
+    query_tokens = tokens(query)
+
+    print("Query tokens:", query_tokens)
