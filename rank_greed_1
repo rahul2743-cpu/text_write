@@ -1,0 +1,121 @@
+# --- GET WEIGHTS ---
+W_QUERY, W_LOCAL_GRAPH, W_DOC_GRAPH = get_weights(
+    query,
+    seeds,
+    query_tokens
+)
+
+print("\n" + "=" * 80)
+print("WEIGHTS")
+print("=" * 80)
+print("W_QUERY:", W_QUERY)
+print("W_LOCAL_GRAPH:", W_LOCAL_GRAPH)
+print("W_DOC_GRAPH:", W_DOC_GRAPH)
+
+candidates = []
+
+for uri in grounded_docs:
+
+    print("\n" + "=" * 80)
+    print("DOCUMENT")
+    print("=" * 80)
+    print("Document URI:", uri)
+
+    doc_score = doc_scores.get(uri, 0)
+    doc_edges = edges_by_doc.get(uri, [])
+
+    print("Document graph score:", doc_score)
+    print("Number of document edges:", len(doc_edges))
+
+    max_edge = max(
+        (e.get("score", 0) for e in doc_edges),
+        default=0
+    )
+
+    print("Maximum edge score:", max_edge)
+
+    for c in KG_CHUNKS[uri]:
+
+        print("\n" + "-" * 80)
+        print("CHUNK")
+        print("-" * 80)
+        print("Chunk ID:", c.get("chunk_id"))
+        print("Content:", c.get("content"))
+
+        query_score = coverage(
+            query_tokens,
+            c["_tokens"]
+        )
+
+        print("Query score:", query_score)
+
+        graph_score = 0.0
+
+        for edge_number, e in enumerate(doc_edges, start=1):
+
+            importance = (
+                e.get("score", 0) / max_edge
+                if max_edge > 0
+                else 0
+            )
+
+            local_score = local_graph_score(
+                c["_tokens"],
+                e
+            )
+
+            score = local_score * importance
+
+            graph_score = max(
+                graph_score,
+                score
+            )
+
+            print("\nEdge", edge_number)
+            print("Source:", e.get("source_label"))
+            print("Predicate:", e.get("predicate"))
+            print("Target:", e.get("target_label"))
+            print("Original edge score:", e.get("score"))
+            print("Edge importance:", importance)
+            print("Local graph score:", local_score)
+            print("Weighted edge score:", score)
+            print("Current graph score:", graph_score)
+
+        print("\nSCORE SUMMARY")
+        print("Query score:", query_score)
+        print("Local graph score:", graph_score)
+        print("Document graph score:", doc_score)
+
+        if query_score <= 0 and graph_score <= 0:
+            print("Result: SKIPPED")
+            continue
+
+        final_score = (
+            W_QUERY * query_score
+            + W_LOCAL_GRAPH * graph_score
+            + W_DOC_GRAPH * doc_score
+        )
+
+        print("\nFINAL SCORE CALCULATION")
+        print(
+            f"({W_QUERY} × {query_score}) + "
+            f"({W_LOCAL_GRAPH} × {graph_score}) + "
+            f"({W_DOC_GRAPH} × {doc_score})"
+        )
+
+        print("Final chunk score:", final_score)
+
+        candidates.append({
+            **c,
+            "_score": final_score,
+            "_query": query_score,
+            "_graph": graph_score,
+            "_doc": doc_score
+        })
+
+        print("Result: ADDED TO CANDIDATES")
+
+print("\n" + "=" * 80)
+print("TOTAL CANDIDATES")
+print("=" * 80)
+print("Number of candidates:", len(candidates))
